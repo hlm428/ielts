@@ -428,7 +428,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
   function defaults() {
     return {
       version: 1,
-      settings: { dark: false, fontSize: "m", dailyNew: 10 },
+      settings: { dark: false, fontSize: "m", dailyNew: 10, voice: "gb" },
       words: {},            /* 已学/在学单词的 SM-2 记录，key 是小写单词 */
       wrong: {},            /* 错词本：{ 单词: { count, lastWrong, cleared } } */
       stats: { days: {} },  /* 每天学习情况：{ sec, newN, revN, right, wrong } */
@@ -767,9 +767,15 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     try {
       var vs = window.speechSynthesis.getVoices() || [];
       if (!vs.length) return;
+      /* 口音偏好：settings.voice（gb=英音 默认 / us=美音），设置页可切换 */
+      var pref = "gb";
+      try {
+        var st = window.IELTS.store.get();
+        if (st && st.settings && st.settings.voice) pref = st.settings.voice;
+      } catch (e) { /* storage 未就绪时用默认 */ }
+      var re = pref === "us" ? /^en[-_]US/i : /en[-_]GB/i;
       var v = null, i;
-      /* 1. 英音 2. 其他英文 3. 第一个能说英文的 */
-      for (i = 0; i < vs.length; i++) if (/en[-_]GB/i.test(vs[i].lang)) { v = vs[i]; break; }
+      for (i = 0; i < vs.length; i++) if (re.test(vs[i].lang)) { v = vs[i]; break; }
       if (!v) for (i = 0; i < vs.length; i++) if (/^en/i.test(vs[i].lang)) { v = vs[i]; break; }
       if (!v) v = vs[0];
       T.voice = v;
@@ -1000,7 +1006,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       newTodo: newTodo,
       review: review,
       streak: c.stats.streak(state, todayKey),
-      minToday: day ? Math.round((day.sec || 0) / 60) : 0,
+      secToday: day ? (day.sec || 0) : 0, /* 按秒记录（反馈七-2） */
       learned: wc.learned,
       learning: wc.learning,
       mastered: wc.mastered,
@@ -1041,9 +1047,9 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         examHtml = '<div class="card"><b>🎉 考试日期已过（' + c.u.esc(st.plan.examDate) + '）。</b>' +
           '<div class="muted small">想重新规划，去「学习计划」里改日期。</div></div>';
       } else {
-        examHtml = '<div class="card"><b>还没有设置考试日期。</b>' +
-          '<div class="muted small">到「学习计划」里填上日期和目标分，每天该学多少就自动帮你排好。</div>' +
-          '<div style="margin-top:.6rem"><button class="btn ghost small" id="goPlan1">去设置</button></div></div>';
+        examHtml = '<div class="card"><b>还没有制定学习计划。</b>' +
+          '<div class="muted small">到「学习计划」里填上考试日期和目标分，每天该学多少就自动帮你排好。</div>' +
+          '<div style="margin-top:.6rem"><button class="btn ghost small" id="goPlan1">去制定计划</button></div></div>';
       }
 
       var barHtml = bars.map(function (b, i) {
@@ -1057,10 +1063,16 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       }).join("");
 
       el.innerHTML =
+        (o.backupDue
+          ? '<div class="card" style="border:2px solid var(--warn);display:flex;align-items:center;gap:.7rem">' +
+            '<span style="font-size:1.4rem">⏰</span><div class="grow"><b style="color:var(--warn)">学习数据超过 7 天没备份了</b>' +
+            '<div class="muted small">浏览器清缓存或换设备就全没了，花 10 秒导出一份保险。</div></div>' +
+            '<button class="btn small" id="backupNow">去备份</button></div>'
+          : '') +
         '<div class="card"><b>' + greeting + '</b>' +
         '<div class="muted small" style="margin-top:.2rem">已学 ' + o.learned + ' · 在学 ' + o.learning +
         ' · 掌握 ' + o.mastered + '（共 ' + o.totalWords + ' 词）' +
-        (o.minToday ? ' · 今天已学 ' + o.minToday + ' 分钟' : '') + '</div>' +
+        (o.secToday ? ' · 今天已学 ' + c.u.fmtSec(o.secToday) : '') + '</div>' +
         '<div class="progress" style="margin-top:.6rem"><div style="width:' +
         Math.round((o.touched / o.totalWords) * 100) + '%"></div></div></div>' +
 
@@ -1073,20 +1085,25 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         '</div>' +
 
         '<div style="height:.7rem"></div>' +
-        '<button class="btn block" id="goVocab1">📇 开始背单词</button>' +
-        '<div style="display:flex;gap:.6rem;margin-top:.6rem">' +
-        '<button class="btn ghost" style="flex:1" id="goSpeak1">🎙️ 练口语</button>' +
-        '<button class="btn ghost" style="flex:1" id="goWrite1">✍️ 练写作</button></div>' +
+        '<button class="btn block" id="goVocab1" style="font-size:1.15rem;padding:1rem;box-shadow:var(--shadow)">📇 开始背单词</button>' +
+        '<div style="display:flex;gap:.6rem;margin-top:.7rem">' +
+        '<button class="btn ghost" style="flex:1;padding:.95rem;font-size:1.02rem" id="goSpeak1">🎙️ 练口语</button>' +
+        '<button class="btn ghost" style="flex:1;padding:.95rem;font-size:1.02rem" id="goWrite1">✍️ 练写作</button></div>' +
 
         '<div class="card" style="margin-top:.9rem"><h2>最近 7 天学习时长</h2>' +
         '<div class="bars">' + barHtml + '</div>' +
-        (o.minToday || bars.some(function (b) { return b.min; })
+        (bars.some(function (b) { return b.min; })
           ? ''
-          : '<div class="empty">🌱 这里还是空的——背几个词，这张图就有内容啦</div>') +
+          : (o.secToday
+            ? '<div class="empty">今天已学习 ' + o.secToday + ' 秒——再学 ' + (60 - o.secToday) + ' 秒，图上就会亮起第一根柱子 🌱</div>'
+            : '<div class="empty">🌱 这里还是空的——背几个词，这张图就有内容啦</div>')) +
         '</div>' +
 
         '<div class="muted small" style="text-align:center;padding:.2rem 0 1rem">🔒 数据只保存在这台设备的浏览器里，不会上传到任何地方；换设备前请先在「设置」里导出备份' +
         (o.backupDue ? ' · <b style="color:var(--warn)">超过 7 天未备份</b>' : '') + '</div>';
+
+      var bn = el.querySelector("#backupNow");
+      if (bn) bn.onclick = function () { location.hash = "set"; };
 
       el.querySelector("#goVocab1").onclick = function () { location.hash = "vocab"; };
       el.querySelector("#goSpeak1").onclick = function () { location.hash = "speak"; };
@@ -1107,6 +1124,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
   var V = {};
 
   var MODES = {
+    card: "翻卡学习 → 自测认识",
     zh2en: "看中文 → 选英文",
     en2zh: "看英文 → 选中文",
     spell: "听发音 → 拼写"
@@ -1151,7 +1169,8 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
   /* 构造一场学习：
      pool="normal"：今天到期的复习词 + 每日额度内的新词；
      pool="wrong"：错词本里还没清掉的词。
-     mode：zh2en / en2zh / spell / mix（每题随机三选一）
+     mode：card / zh2en / en2zh / spell / mix（每题随机四选一）
+     card：翻卡学习——正面只有单词和音标，用户自测后点"认识/不认识"记分；
      zh2en：题干=中文释义，选项=英文单词，answer=英文；
      en2zh：题干=英文单词（带音标/发音），选项=中文释义，answer=中文。 */
   V.buildSession = function (state, todayKey, mode, pool) {
@@ -1190,11 +1209,13 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     }
 
     var items = words.map(function (w, i) {
-      var m = (mode === "mix") ? u.pick(["zh2en", "en2zh", "spell"], 1)[0] : mode;
+      var m = (mode === "mix") ? u.pick(["card", "zh2en", "en2zh", "spell"], 1)[0] : mode;
       /* 不支持朗读时，听写题自动换成看中文选英文 */
       if (m === "spell" && !core().tts.hasTTS()) m = "zh2en";
       var item = { word: w, kind: kindList[i], mode: m, hintUsed: false, options: null, answer: null };
-      if (m === "zh2en") {
+      if (m === "card") {
+        item.answer = w.en; /* 卡片模式由用户自测判定，answer 仅用于发音 */
+      } else if (m === "zh2en") {
         item.options = V.makeOptions(w, all, "en", 4);
         item.answer = w.en;
       } else if (m === "en2zh") {
@@ -1296,6 +1317,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '</div><span class="pill">' + learned + "/" + total + '</span></div>' +
       '<div style="margin:.7rem 0 .3rem;color:var(--muted);font-size:.88rem">选一种练法：</div>' +
       '<div class="opts" id="modeBox">' +
+      '<button data-m="card">🃏 翻卡学习<span class="muted small">（先学后考，新词入门首选）</span></button>' +
       '<button data-m="en2zh">🔍 看英文 → 选中文<span class="muted small">（最轻松，先混个脸熟）</span></button>' +
       '<button data-m="zh2en">🧠 看中文 → 选英文<span class="muted small">（换个方向，记得更牢）</span></button>' +
       '<button data-m="spell">✏️ 听发音 → 拼写<span class="muted small">' +
@@ -1313,7 +1335,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<div class="muted small">已学 ' + learned + ' · 在学 ' + wc.learning + ' · 掌握 ' + wc.mastered +
       '（共 ' + total + ' 词）</div></div>';
 
-      var mode = "mix";
+      var mode = "card"; /* 默认：先学后考 */
       var modeBox = $("#modeBox", el);
       function mark() {
         var bs = modeBox.querySelectorAll("button");
@@ -1391,7 +1413,28 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<div class="progress"><div style="width:' + Math.round((sess.idx / total) * 100) + '%"></div></div></div>';
 
     var body = "";
-    if (it.mode === "en2zh") {
+    if (it.mode === "card") {
+      /* 翻卡学习（新词先学后考）：正面只给单词和音标 */
+      body = '<div class="card" id="flashcard" role="button" tabindex="0" style="text-align:center;min-height:9rem;cursor:pointer">' +
+        '<div id="cardFace">' +
+        '<div class="muted small">先想一想这个词是什么意思，再翻面对答案</div>' +
+        '<div style="font-size:2.2rem;font-weight:800;margin:.5rem 0">' + u.esc(it.word.en) + '</div>' +
+        '<div class="muted">' + u.esc(it.word.ipa) + '</div>' +
+        '<button class="btn small ghost" id="say" aria-label="播放单词发音" style="margin-top:.4rem">🔊 播放发音</button>' +
+        '</div>' +
+        '<div id="cardBack" class="hide">' +
+        '<div style="font-size:1.2rem;font-weight:700;color:var(--ok)">' + u.esc(it.word.zh) + '</div>' +
+        '<div class="small" style="margin-top:.5rem">' + u.esc(it.word.ex) + '</div>' +
+        '<div class="small muted">' + u.esc(it.word.exZh) + '</div>' +
+        (it.word.memo ? '<div class="small" style="margin-top:.5rem;background:var(--warn-weak);border-radius:10px;padding:.5rem .7rem">💡 ' + u.esc(it.word.memo) + '</div>' : '') +
+        '</div>' +
+        '<div class="muted small" style="margin-top:.6rem" id="cardTip">👆 点卡片翻面</div>' +
+        '</div>' +
+        '<div class="grid2" style="margin-top:.7rem">' +
+        '<button class="btn ok" id="know" disabled aria-label="我认识这个词">😊 认识</button>' +
+        '<button class="btn danger" id="dontknow" disabled aria-label="我不认识这个词">🤔 不认识</button>' +
+        '</div>';
+    } else if (it.mode === "en2zh") {
       /* 看英文 → 选中文：题干必须只有英文（+音标），选项是中文释义 */
       body = '<div class="card" style="text-align:center"><div style="font-size:1.9rem;font-weight:800">' +
         u.esc(it.word.en) + '</div><div class="muted">' + u.esc(it.word.ipa) +
@@ -1437,7 +1480,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         if (correct) b.classList.add("right"); else b.classList.add("wrong");
         finishItem(el, it, correct);
       });
-    } else {
+    } else if ($("#spellIn", el)) {
       var go = $("#spellGo", el), inp = $("#spellIn", el);
       go.onclick = function () {
         if (sess.done) return;
@@ -1452,6 +1495,27 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         $("#hintBox", el).textContent = "提示：" + V.spellHint(it.word);
         c.tts.speak(it.word.en, true);
       };
+    } else {
+      /* 翻卡模式 */
+      var know = $("#know", el), dk = $("#dontknow", el);
+      var flipped = false;
+      function flip() {
+        if (flipped || sess.done) return;
+        flipped = true;
+        $("#cardFace", el).classList.add("hide");
+        $("#cardBack", el).classList.remove("hide");
+        $("#cardTip", el).textContent = "👉 根据刚才想的意思，诚实点一个";
+        know.disabled = false;
+        dk.disabled = false;
+        c.tts.speak(it.word.en, false);
+      }
+      var fc = $("#flashcard", el);
+      fc.onclick = flip;
+      fc.addEventListener("keydown", function (ev) {
+        if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); flip(); }
+      });
+      know.onclick = function () { if (flipped && !sess.done) finishItem(el, it, true); };
+      dk.onclick = function () { if (flipped && !sess.done) finishItem(el, it, false); };
     }
   }
 
@@ -1896,6 +1960,51 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     }
   };
 
+  /* 同义替换速查表（反馈四-3）：雅思写作最高频的换词组合 */
+  var SYN = [
+    ["important", "crucial / vital / essential / significant"],
+    ["think / believe", "argue / maintain / contend / be convinced that"],
+    ["good", "beneficial / advantageous / rewarding"],
+    ["bad", "detrimental / adverse / harmful"],
+    ["many / a lot of", "numerous / a wealth of / an array of"],
+    ["more and more", "an increasing number of / a growing proportion of"],
+    ["show", "demonstrate / reveal / indicate / illustrate"],
+    ["because", "owing to / due to / given that"],
+    ["but / however", "nevertheless / nonetheless / by contrast"],
+    ["so / therefore", "consequently / as a result / hence"],
+    ["people", "individuals / citizens / the public"],
+    ["children", "youngsters / juveniles / the young generation"],
+    ["old people", "the elderly / senior citizens"],
+    ["problem", "issue / challenge / concern"],
+    ["solution", "remedy / approach / measure"],
+    ["improve", "enhance / boost / elevate / refine"],
+    ["reduce", "curb / mitigate / alleviate / cut down"],
+    ["get / obtain", "acquire / gain / secure"],
+    ["use", "utilise / employ / adopt / harness"],
+    ["famous", "renowned / celebrated / prominent"]
+  ];
+
+  function drawSyn(el) {
+    var rows = SYN.map(function (pair) {
+      return '<div class="row"><div class="grow"><div class="t">' + pair[0] + '</div>' +
+        '<div class="sub">' + pair[1] + '</div></div>' +
+        '<button class="btn small ghost" aria-label="朗读同义替换示例">🔊</button></div>';
+    }).join("");
+    el.innerHTML =
+      '<div class="card"><h2>🔁 同义替换速查表</h2>' +
+      '<div class="muted small" style="margin:.2rem 0 .5rem">写作和口语换词就靠这个：写完检查一遍，把出现 3 次以上的词换掉。🔊 可点击朗读。</div>' +
+      rows + '</div>' +
+      '<button class="btn ghost block" id="backWrite">← 返回写作</button>';
+    $("#backWrite", el).onclick = function () { cur.tab = "Task 2"; drawTabs(el); };
+    el.querySelectorAll(".row button").forEach(function (b) {
+      b.onclick = function () {
+        var row = b.closest(".row");
+        core().tts.pickVoice();
+        core().tts.speak(row.querySelector(".t").textContent + ", " + row.querySelector(".sub").textContent);
+      };
+    });
+  }
+
   function drawTabs(el) {
     var st = core().store.get();
     var histN = st.writing.essays.length;
@@ -1904,13 +2013,16 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<button class="btn ' + (cur.tab === "Task 1" ? "" : "ghost") + '" data-t="Task 1">📊 小作文 Task 1（20分钟·150词）</button>' +
       '<button class="btn ' + (cur.tab === "Task 2" ? "" : "ghost") + '" data-t="Task 2">📝 大作文 Task 2（40分钟·250词）</button>' +
       '<button class="btn ' + (cur.tab === "hist" ? "" : "ghost") + '" data-t="hist">🗂️ 我的作文历史（' + histN + '）</button>' +
+      '<button class="btn ' + (cur.tab === "syn" ? "" : "ghost") + '" data-t="syn">🔁 同义替换速查</button>' +
       '</div></div><div id="writeBody"></div>';
     var body = $("#writeBody", el);
-    if (cur.tab === "hist") drawHist(body); else drawEditor(body);
+    if (cur.tab === "hist") drawHist(body);
+    else if (cur.tab === "syn") drawSyn(body);
+    else drawEditor(body);
     el.querySelectorAll("[data-t]").forEach(function (b) {
       b.onclick = function () {
         cur.tab = b.getAttribute("data-t");
-        if (cur.tab !== "hist") {
+        if (cur.tab === "Task 1" || cur.tab === "Task 2") {
           var first = data().filter(function (x) { return x.type === cur.tab; })[0];
           if (first) cur.no = first.no;
         }
@@ -2434,6 +2546,13 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<button class="btn small ' + (st.settings.fontSize === "s" ? "" : "ghost") + '" data-fs="s">小</button>' +
       '<button class="btn small ' + (st.settings.fontSize === "m" ? "" : "ghost") + '" data-fs="m">标准</button>' +
       '<button class="btn small ' + (st.settings.fontSize === "l" ? "" : "ghost") + '" data-fs="l">大</button>' +
+      '</div>' +
+      '<div class="row" style="margin-top:.3rem"><div class="grow"><b>朗读口音</b>' +
+      '<div class="sub muted">考试以英音为主，美音也可练耳朵</div></div></div>' +
+      '<div style="display:flex;gap:.5rem;margin-bottom:.4rem">' +
+      '<button class="btn small ' + ((st.settings.voice || "gb") === "gb" ? "" : "ghost") + '" data-voice="gb">🇬🇧 英音</button>' +
+      '<button class="btn small ' + (st.settings.voice === "us" ? "" : "ghost") + '" data-voice="us">🇺🇸 美音</button>' +
+      '<button class="btn small ghost" id="voiceTest">🔊 试听</button>' +
       '</div></div>' +
 
       '<div class="card"><h2>📇 背单词</h2>' +
@@ -2479,6 +2598,20 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         draw(el);
       };
     });
+    el.querySelectorAll("[data-voice]").forEach(function (b) {
+      b.onclick = function () {
+        var st2 = core().store.get();
+        st2.settings.voice = b.getAttribute("data-voice");
+        core().store.save();
+        core().tts.pickVoice();
+        core().tts.speak("Do you think teachers will be replaced by computers?");
+        draw(el);
+      };
+    });
+    $("#voiceTest", el).onclick = function () {
+      core().tts.pickVoice();
+      core().tts.speak("Do you think teachers will be replaced by computers?");
+    };
 
     /* 新词数 */
     $("#dnMinus", el).onclick = function () {
