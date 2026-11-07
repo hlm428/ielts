@@ -776,20 +776,23 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
 
 </script>
 <script>
-/* 每周报告（反馈三）：纯函数，数据全部来自本地记录，不联网。
-   weekly(state, todayKey) → { days, newWords, reviewCount, accuracy, speakCount, essayCount, advice } */
+/* 每周报告（反馈三 + 改进版提示词 T1/T2）：纯函数，数据全部来自本地记录，不联网。
+   weekly(state, todayKey, weekOffset) → 单周指标（0=本期，1=上期，支持翻周）
+   compare(state, todayKey) → 本期 vs 上期对比表 + 短板 Top3 + 行动按钮（报告→行动闭环） */
 (function () {
   "use strict";
   var R = {};
 
   function core() { return window.IELTS; }
 
-  R.weekly = function (state, todayKey) {
+  /* 单周统计：offset=0 本期（today 往前 7 天含今天），1 上期（再往前 7 天） */
+  R.weekly = function (state, todayKey, weekOffset) {
     var u = core().u;
+    var off = Math.max(0, weekOffset || 0);
     var dates = [];
-    for (var i = 6; i >= 0; i--) dates.push(u.addDays(todayKey, -i));
+    for (var i = off * 7 + 6; i >= off * 7; i--) dates.push(u.addDays(todayKey, -i));
 
-    var days = 0, newWords = 0, reviewCount = 0, right = 0, wrong = 0;
+    var days = 0, newWords = 0, reviewCount = 0, right = 0, wrong = 0, sec = 0;
     dates.forEach(function (k) {
       var d = state.stats.days[k];
       if (d && ((d.sec || 0) > 0 || (d.right || 0) > 0)) days++;
@@ -797,43 +800,129 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       reviewCount += (d && d.revN) || 0;
       right += (d && d.right) || 0;
       wrong += (d && d.wrong) || 0;
+      sec += (d && d.sec) || 0;
     });
     var accuracy = (right + wrong) > 0 ? Math.round((right / (right + wrong)) * 100) : -1;
 
-    /* 本周练过的口语题数：done 记录的 last 落在本周 */
-    var speakCount = 0, k;
+    var speakCount = 0, speakSecAll = 0, k;
     for (k in state.speaking.done) {
-      if (state.speaking.done[k].last && dates.indexOf(state.speaking.done[k].last) >= 0) speakCount++;
+      var d1 = state.speaking.done[k];
+      if (d1.last && dates.indexOf(d1.last) >= 0) speakCount++;
+      speakSecAll += d1.sec || 0;
     }
-    /* 本周作文篇数 */
-    var essayCount = 0;
+    var essays = [], essayWords = [];
     state.writing.essays.forEach(function (e) {
-      if (dates.indexOf(e.date) >= 0) essayCount++;
+      if (dates.indexOf(e.date) >= 0) {
+        essays.push(e);
+        essayWords.push(e.words || 0);
+      }
     });
 
-    return {
+    var out = {
+      dates: dates,
       days: days,
       newWords: newWords,
       reviewCount: reviewCount,
+      right: right,
+      wrong: wrong,
       accuracy: accuracy,
+      sec: sec,
       speakCount: speakCount,
-      essayCount: essayCount,
-      advice: R.advice(days, newWords, accuracy, speakCount, essayCount, state)
+      speakSecAll: speakSecAll,
+      essays: essays,
+      essayCount: essays.length,
+      essayAvgWords: essays.length ? Math.round(essayWords.reduce(function (a, b) { return a + b; }, 0) / essays.length) : 0
     };
+    out.advice = R.advice(state, out);
+    return out;
   };
 
-  /* 一句跟数据挂钩的下周建议（规则生成，不联网） */
-  R.advice = function (days, newWords, accuracy, speakCount, essayCount, state) {
-    if (days === 0) return "本周还没开始学习，先从每天 10 个新词的小目标开始，哪怕 5 分钟也算打卡。";
-    if (speakCount === 0) return "本周口语还没开练——每天挑 1 道题开口说说，考试才不慌。";
-    if (essayCount === 0) return "本周还没写作文，隔天写一篇并看本地检查报告，是提分最快的方式。";
-    if (accuracy >= 0 && accuracy < 70) return "本周答对率只有 " + accuracy + "%，建议先去错词本清一轮，再继续背新词。";
-    if (days <= 3) return "本周学了 " + days + " 天，试着把节奏提到 5 天以上，记忆会更连贯。";
-    if (newWords >= 50) return "本周背了 " + newWords + " 个新词，量不小，下周可以适当放慢新词、多复习巩固。";
+  /* 一句跟数据挂钩的建议（引用本期真实数据，禁止与数据无关的通用话）。
+     cur = weekly 的返回对象。 */
+  R.advice = function (state, cur) {
+    var days = cur.days, newWords = cur.newWords, accuracy = cur.accuracy,
+        speakCount = cur.speakCount, essayCount = cur.essayCount,
+        right = cur.right || 0, wrong = cur.wrong || 0;
+    var touched = 0, k;
+    for (k in state.words) touched++;
+    if (days === 0 && touched === 0) return "本周还没有学习记录——从每天 10 个新词的小目标开始，5 分钟也算打卡。";
+    if (days === 0) return "本周有 " + touched + " 个词的记录但还没学习，错词和复习正在过期，先回到背单词页清一轮。";
+    if (speakCount === 0) return "本周学了 " + days + " 天共 " + newWords + " 个新词，但口语 0 题——每天挑 1 道题开口说，考试才不慌。";
+    if (essayCount === 0) return "本周练了 " + speakCount + " 道口语但还没写作文——隔天写一篇并看本地检查报告，提分最快。";
+    if (accuracy >= 0 && accuracy < 70) return "本周答对率 " + accuracy + "%（对 " + (right + wrong) + " 题错 " + wrong + " 题），先去错词本清一轮再背新词。";
+    if (days <= 3) return "本周学了 " + days + " 天，节奏偏松；把频率提到 5 天以上，记忆连接会更牢。";
+    var wrongN = 0;
+    for (k in state.wrong) if (state.wrong[k] && !state.wrong[k].cleared) wrongN++;
+    if (wrongN > 0) return "本周节奏不错，错词本里还剩 " + wrongN + " 个词，优先消化它们再上新词。";
+    return "本周学 " + days + " 天、背 " + newWords + " 词、练 " + speakCount + " 道口语，节奏很稳——下周可把每日新词加 2 个试试。";
+  };
+
+  /* 短板 Top3：每条附证据（字段来源），按影响排序 */
+  R.weakTop = function (cur, prev) {
+    var list = [];
+    if (cur.days <= 2) list.push({ t: "学习天数少", e: "本期仅 " + cur.days + " 天（来源 stats.days.sec）" });
+    if (cur.speakCount === 0) list.push({ t: "口语零练习", e: "speaking.done.last 均不在本期" });
+    if (cur.essayCount === 0) list.push({ t: "写作零练习", e: "writing.essays.date 均不在本期" });
+    if (cur.accuracy >= 0 && cur.accuracy < 70) list.push({ t: "答对率偏低", e: "right " + cur.right + " / wrong " + cur.wrong + "（stats.days）" });
+    if (prev && prev.days > cur.days) list.push({ t: "比上期退步", e: "上期 " + prev.days + " 天 → 本期 " + cur.days + " 天" });
+    if (cur.reviewCount === 0 && cur.newWords > 0) list.push({ t: "只背不复习", e: "revN 本期累计 0" });
+    return list.slice(0, 3);
+  };
+
+  /* 对比表行（本周与任意上一周对比时复用） */
+  R.rows = function (cur, prev) {
+    var rows = [];
+    function row(name, a, b, fmt) {
+      var fa = fmt ? fmt(a) : a, fb = fmt ? fmt(b) : b;
+      rows.push({ name: name, cur: fa, prev: fb, delta: a - b });
+    }
+    row("学习天数", cur.days, prev.days);
+    row("新增单词", cur.newWords, prev.newWords);
+    row("复习次数", cur.reviewCount, prev.reviewCount);
+    row("学习时长", cur.sec, prev.sec, function (x) { return core().u.fmtSec(x); });
+    row("口语题数", cur.speakCount, prev.speakCount);
+    row("作文篇数", cur.essayCount, prev.essayCount);
+    var a = cur.accuracy, b = prev.accuracy;
+    rows.push({
+      name: "答对率",
+      cur: a < 0 ? "-" : a + "%",
+      prev: b < 0 ? "-" : b + "%",
+      delta: (a < 0 || b < 0) ? 0 : a - b
+    });
+    return rows;
+  };
+
+  /* 本期 vs 上期 对比 + 行动闭环（一键转计划/错词本/作文） */
+  R.compare = function (state, todayKey) {
+    var cur = R.weekly(state, todayKey, 0);
+    var prev = R.weekly(state, todayKey, 1);
+    var actions = [];
+    if (cur.speakCount === 0) actions.push({ label: "🎙️ 去练 1 道口语", hash: "speak" });
+    if (cur.essayCount === 0) actions.push({ label: "✍️ 补一篇作文", hash: "write" });
     var wrongN = 0, k;
     for (k in state.wrong) if (state.wrong[k] && !state.wrong[k].cleared) wrongN++;
-    if (wrongN > 0) return "本周节奏不错，错词本里还有 " + wrongN + " 个词等着清，优先消化它们。";
-    return "本周节奏很稳（学 " + days + " 天、背 " + newWords + " 词、练 " + speakCount + " 道口语），下周可以试着每天加 2 个新词。";
+    if (wrongN > 0) actions.push({ label: "❌ 清错词本（" + wrongN + " 个）", hash: "vocab" });
+    actions.push({ label: "🗓️ 把建议写进今天的计划", hash: "plan" });
+    return { cur: cur, prev: prev, rows: R.rows(cur, prev), weak: R.weakTop(cur, prev), actions: actions };
+  };
+
+  /* 把周报建议一键写进今天的计划（返回新增任务名，供 toast 展示） */
+  R.addAdviceToPlan = function (state, todayKey) {
+    var cur = R.weekly(state, todayKey, 0);
+    var tasks = [];
+    if (cur.speakCount === 0) tasks.push("口语练 1 题（周报建议）");
+    if (cur.essayCount === 0) tasks.push("写 1 篇作文（周报建议）");
+    if (cur.accuracy >= 0 && cur.accuracy < 70) tasks.push("清一轮错词本（周报建议）");
+    if (!tasks.length) tasks.push("保持本周节奏：复习 " + Math.max(1, cur.reviewCount || 5) + " 个旧词（周报建议）");
+    var day = state.plan.days[todayKey];
+    if (!day) day = state.plan.days[todayKey] = { tasks: [] };
+    var added = 0;
+    tasks.forEach(function (name) {
+      var exists = day.tasks.some(function (t) { return t.name === name; });
+      if (!exists) { day.tasks.push({ name: name, done: false, kind: "review" }); added++; }
+    });
+    if (added) core().stats && core().store.save();
+    return added;
   };
 
   window.IELTS = window.IELTS || {};
@@ -1103,30 +1192,70 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
 
   window.IELTS = window.IELTS || {};
   window.IELTS.dash = D;
+  D.showWeekly = showWeekly;
 
-  /* 每周报告弹窗（反馈三）：数据来自本地记录 */
-  function showWeekly(el) {
+  /* 每周报告弹窗（双报告驱动）：本期 vs 上期对比 + 短板 Top3 + 行动闭环 + 按周翻阅 */
+  function showWeekly(el, off) { /* 供设置页等入口复用：IELTS.dash.showWeekly(el, off) */
     var c = core(), st = c.store.get(), today = c.u.todayKey();
-    var w = c.report.weekly(st, today);
-    var accText = w.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + w.accuracy + "%";
+    off = off || 0;
+    var cur = c.report.weekly(st, today, off);
+    var prev = c.report.weekly(st, today, off + 1);
+    var rows = c.report.rows(cur, prev);
+    var weak = c.report.weakTop(cur, prev);
     var mask = document.getElementById("mask"), box = document.getElementById("maskBox");
+
+    var rowsHtml = rows.map(function (r) {
+      var d = r.delta;
+      var arrow = d > 0 ? '<span class="pill ok">↑</span>' : d < 0 ? '<span class="pill bad">↓</span>' : '<span class="muted small">—</span>';
+      return '<tr><td style="padding:.25rem 0">' + r.name + '</td>' +
+        '<td style="text-align:center;font-weight:700">' + r.cur + '</td>' +
+        '<td style="text-align:center;color:var(--muted)">' + r.prev + '</td>' +
+        '<td style="text-align:center">' + arrow + '</td></tr>';
+    }).join("");
+    var weakHtml = weak.length
+      ? weak.map(function (x) { return '<li>' + x.t + '（' + x.e + '）</li>'; }).join("")
+      : '<li>本期没有明显短板，继续保持。</li>';
+    var actionsHtml = off === 0 ? c.report.compare(st, today).actions : [];
+    var actHtml = actionsHtml.length
+      ? actionsHtml.map(function (a, i) {
+          return '<button class="btn small' + (i === 0 ? "" : " ghost") + '" data-act="' + a.hash + '" data-label="' + c.u.esc(a.label) + '" style="margin:.3rem .3rem 0 0">' + a.label + '</button>';
+        }).join("")
+      : "";
+
     box.innerHTML =
-      '<h3 style="margin:0 0 .6rem">📊 每周报告（' + c.u.todayKey() + ' 往前 7 天）</h3>' +
-      '<div class="grid3">' +
-      '<div class="stat"><div class="num">' + w.days + '</div><div class="lbl">学习天数</div></div>' +
-      '<div class="stat"><div class="num">' + w.newWords + '</div><div class="lbl">新增单词</div></div>' +
-      '<div class="stat"><div class="num">' + w.reviewCount + '</div><div class="lbl">复习次数</div></div>' +
-      '</div><div style="height:.5rem"></div><div class="grid3">' +
-      '<div class="stat ' + (w.accuracy >= 0 && w.accuracy < 70 ? "bad" : "ok") + '"><div class="num">' +
-      (w.accuracy < 0 ? "—" : w.accuracy + "%") + '</div><div class="lbl">答对率</div></div>' +
-      '<div class="stat"><div class="num">' + w.speakCount + '</div><div class="lbl">口语题数</div></div>' +
-      '<div class="stat"><div class="num">' + w.essayCount + '</div><div class="lbl">作文篇数</div></div>' +
-      '</div>' +
-      '<div style="background:var(--brand-weak);border-radius:10px;padding:.7rem;margin-top:.8rem;font-size:.92rem">💡 <b>下周建议：</b>' + c.u.esc(w.advice) + '</div>' +
-      '<div class="muted small" style="margin-top:.6rem">' + accText + ' · 数据全部来自本机记录</div>' +
-      '<div class="btns"><button class="btn block" id="repClose">好的</button></div>';
+      '<h3 style="margin:0 0 .6rem">📊 学习报告（' +
+      cur.dates[6] + ' 往前 7 天' + (off ? '，再往前第 ' + off + ' 周' : '') + '）</h3>' +
+      '<table style="width:100%;border-collapse:collapse;font-size:.9rem">' +
+      '<tr style="color:var(--muted)"><th style="text-align:left">指标</th><th>' + (off ? "该周" : "本期") + '</th><th>上期</th><th>变化</th></tr>' +
+      rowsHtml + '</table>' +
+      '<div style="margin-top:.8rem"><b class="small">短板 Top3（附数据证据）：</b>' +
+      '<ul class="small" style="margin:.3rem 0 0;padding-left:1.2rem">' + weakHtml + '</ul></div>' +
+      '<div style="background:var(--brand-weak);border-radius:10px;padding:.7rem;margin-top:.8rem;font-size:.92rem">💡 <b>建议：</b>' + c.u.esc(cur.advice) + '</div>' +
+      (off === 0 && actHtml ? '<div style="margin-top:.7rem"><b class="small">一键行动：</b><div style="margin-top:.3rem">' + actHtml + '</div></div>' : '') +
+      '<div class="muted small" style="margin-top:.7rem">口径：答对率=right/(right+wrong)；无样本显示 -；数据全部来自本机记录，非 AI 评分。</div>' +
+      '<div class="btns" style="flex-wrap:wrap">' +
+      '<button class="btn ghost" id="repPrev">◀ 上一周</button>' +
+      (off > 0 ? '<button class="btn ghost" id="repNext">回到本期 ▶</button>' : '') +
+      '<button class="btn" id="repClose">好的</button></div>';
     mask.classList.add("show");
+
     box.querySelector("#repClose").onclick = function () { mask.classList.remove("show"); };
+    box.querySelector("#repPrev").onclick = function () { showWeekly(el, off + 1); };
+    var nx = box.querySelector("#repNext");
+    if (nx) nx.onclick = function () { showWeekly(el, Math.max(0, off - 1)); };
+    box.querySelectorAll("[data-act]").forEach(function (b) {
+      b.onclick = function () {
+        var hash = b.getAttribute("data-act");
+        mask.classList.remove("show");
+        if (hash === "plan") {
+          var added = c.report.addAdviceToPlan(st, today);
+          c.app.toast(added ? "已把 " + added + " 条建议写进今天的计划 🗓️" : "今天的计划里已经有这些建议了");
+          location.hash = "plan";
+        } else {
+          location.hash = hash;
+        }
+      };
+    });
   }
 
   P.home = {
@@ -2887,6 +3016,11 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<div class="muted small" style="margin-top:.4rem">已学 ' + learned + ' 个词，错词本里 ' + wrongN + ' 个词等着清。</div>' +
       '</div>' +
 
+      '<div class="card"><div class="row" style="border:0;padding-top:0"><div class="grow">' +
+      '<b>📊 学习报告</b>' +
+      '<div class="sub muted">本周 vs 上期：天数/词数/答对率/口语/作文，附行动建议</div></div>' +
+      '<button class="btn small" id="btnWeekly">查看</button></div></div>' +
+
       '<div class="card"><h2>💾 备份（换电脑、换手机前一定要看）</h2>' +
       '<div class="muted small" style="margin:.3rem 0 .5rem">🔒 数据只保存在这台设备的浏览器里，不会上传到任何地方。</div>' +
       (st.stats && core().stats.backupDue(st, core().u.todayKey())
@@ -2957,6 +3091,12 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       var v = SE.setDailyNew(this.value);
       this.value = v;
       c.app.toast("每天新词改为 " + v + " 个");
+    };
+
+    /* 学习报告入口（改进版提示词 T1：常驻入口不靠弹窗才能找到） */
+    $("#btnWeekly", el).onclick = function () {
+      var dash = core().dash;
+      if (dash && dash.showWeekly) dash.showWeekly(el, 0);
     };
 
     /* 备份：先触发下载并记录备份时间，立即重绘页面（提醒消失+显示上次备份日期），再弹文本兜底框 */
