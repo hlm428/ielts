@@ -933,7 +933,30 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     return added;
   };
 
-  /* ---------- B1：报告导出与专项（改进版提示词 backlog） ---------- */
+  /* ---------- B1：报告导出与专项 + 单一判定源 ---------- */
+
+  /* 单一判定源（R4 补强）：零样本/口径/可信度的判定只在这里做一次，
+     弹窗渲染与 exportText 都消费 subjectLines 的输出，禁止各拼一套。 */
+  R.subjectLines = function (state, cur) {
+    var cred = R.credibility(state, cur.dates, cur);
+    var sub = R.subjects(state, cur.dates);
+    var eb = R.essaysBreakdown(state, cur.dates);
+    return {
+      speakSecLine: cur.speakSec > 0
+        ? "口语时长 " + core().u.fmtSec(cur.speakSec) + (cur.speakSecApprox ? "（近似值，旧版未按天记录）" : "")
+        : "本期无口语练习",
+      accLine: cur.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + cur.accuracy + "%",
+      essayLine: eb.count > 0
+        ? "Task1 " + eb.t1 + " 篇 + Task2 " + eb.t2 + " 篇，平均 " + eb.avg + " 词，达标 " + eb.okCount + " 篇"
+        : "本期无作文（样本不足，不显示平均字数）",
+      credLine: "口径：答对率=right/(right+wrong)；无样本显示 -；" + cred.notAi + "。",
+      approxLine: cred.approx,
+      subjects: sub,
+      essaysBreakdown: eb,
+      credibility: cred
+    };
+  };
+
 
   /* 口语专项：Part 分布、话题覆盖、本期题数 */
   R.subjects = function (state, dates) {
@@ -998,38 +1021,34 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     };
   };
 
-  /* 报告纯文本导出（含口径与可信度说明） */
+  /* 报告纯文本导出：消费 subjectLines 单一判定源（R4：禁止另拼一套） */
   R.exportText = function (state, todayKey, weekOffset) {
-    var u = core().u;
     var cur = R.weekly(state, todayKey, weekOffset || 0);
     var prev = R.weekly(state, todayKey, (weekOffset || 0) + 1);
-    var cred = R.credibility(state, cur.dates, cur);
-    var sub = R.subjects(state, cur.dates);
+    var L = R.subjectLines(state, cur);
     var rows = R.rows(cur, prev);
-    var L = [];
-    L.push("雅思随身背 · 学习测评报告");
-    L.push("周期：" + cur.dates[0] + " ~ " + cur.dates[6] + "（本期）");
-    L.push("");
-    L.push("【核心指标】本期 / 上期");
-    rows.forEach(function (r) {
-      var prevText = r.prev === "0秒" || r.prev === 0 ? "无记录" : r.prev;
-      L.push("- " + r.name + "：" + r.cur + "（上期 " + prevText + "）");
-    });
-
-    L.push("");
-    L.push("【口语专项】Part1 " + sub.p1 + " 题 · Part2 " + sub.p2 + " 题 · Part3 " + sub.p3 + " 题 · 话题覆盖 " + sub.topicCount + " 个");
-    var eb = R.essaysBreakdown(state, cur.dates);
-    L.push("【写作专项】" + (eb.count ? "Task1 " + eb.t1 + " 篇 + Task2 " + eb.t2 + " 篇，平均 " + eb.avg + " 词，达标 " + eb.okCount + " 篇；字数：" + eb.words.join(", ") : "本期无作文"));
-    L.push("");
-    L.push("【短板 Top3】");
     var weak = R.weakTop(cur, prev);
-    if (!weak.length) weak.push({ t: "本期没有明显短板", e: "" });
-    weak.forEach(function (w) { L.push("- " + w.t + (w.e ? "（" + w.e + "）" : "")); });
-    L.push("");
-    L.push("【建议】" + cur.advice);
-    L.push("");
-    L.push("【数据可信度】样本天数 " + cred.sampleDays + "/7；" + cred.approx + "；" + cred.notAi + "；" + cred.source);
-    return L.join("\n");
+    var out = [];
+    out.push("雅思随身背 · 学习测评报告");
+    out.push("周期：" + cur.dates[0] + " ~ " + cur.dates[6] + "（本期）");
+    out.push("");
+    out.push("【核心指标】本期 / 上期");
+    rows.forEach(function (r) {
+      var pv = r.prev === "0秒" || r.prev === 0 ? "无记录" : r.prev;
+      out.push("- " + r.name + "：" + r.cur + "（上期 " + pv + "）");
+    });
+    out.push("");
+    out.push("【口语专项】Part1 " + L.subjects.p1 + " 题 · Part2 " + L.subjects.p2 + " 题 · Part3 " + L.subjects.p3 + " 题 · 话题覆盖 " + L.subjects.topicCount + " 个");
+    out.push("【写作专项】" + L.essayLine + (L.essaysBreakdown.words.length ? "；字数：" + L.essaysBreakdown.words.join(", ") : ""));
+    out.push("");
+    out.push("【短板 Top3】");
+    var weakList = weak.length ? weak : [{ t: "本期没有明显短板", e: "" }];
+    weakList.forEach(function (w) { out.push("- " + w.t + (w.e ? "（" + w.e + "）" : "")); });
+    out.push("");
+    out.push("【建议】" + cur.advice);
+    out.push("");
+    out.push("【数据可信度】样本天数 " + L.credibility.sampleDays + "/7；" + L.credibility.approx + "；" + L.credibility.notAi + "；" + L.credibility.source);
+    return out.join("\n");
   };
 
   /* 报告 JSON 导出（与 exportText 同源，供存档/外部查看） */
@@ -1328,8 +1347,18 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     var prev = c.report.weekly(st, today, off + 1);
     var rows = c.report.rows(cur, prev);
     var weak = c.report.weakTop(cur, prev);
-    var cred = c.report.credibility(st, cur.dates, cur);
-    var accText = cur.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + cur.accuracy + "%";
+    var L = c.report.subjectLines(st, cur); /* 单一判定源（R4）：弹窗只消费它的行文案 */
+    var cred = L.credibility;
+    /* 副作用前置（R4）：本期报告存档必须在生成 HTML 之前，否则按钮显示滞后一帧 */
+    if (off === 0) {
+      st.reportArchive = st.reportArchive || {};
+      st.reportArchive[today] = {
+        days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount,
+        accuracy: cur.accuracy, speakCount: cur.speakCount, essayCount: cur.essayCount,
+        sec: cur.sec, advice: cur.advice
+      };
+      c.store.save();
+    }
     var mask = document.getElementById("mask"), box = document.getElementById("maskBox");
 
     var rowsHtml = rows.map(function (r) {
@@ -1349,9 +1378,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
           return '<button class="btn small" data-act="' + a.hash + '" style="margin:.3rem .3rem 0 0">' + a.label + '</button>';
         }).join("")
       : "";
-    var speakSecLine = cur.speakSec
-      ? '口语时长 ' + c.u.fmtSec(cur.speakSec) + (cur.speakSecApprox ? '（近似值，旧版未按天记录）' : '')
-      : '本期无口语练习';
+    var speakSecLine = L.speakSecLine;
 
     box.innerHTML =
       '<h3 style="margin:0 0 .6rem">📊 学习报告（' +
@@ -1359,7 +1386,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<table style="width:100%;border-collapse:collapse;font-size:.9rem">' +
       '<tr style="color:var(--muted)"><th style="text-align:left">指标</th><th>' + (off ? "该周" : "本期") + '</th><th>上期</th><th>变化</th></tr>' +
       rowsHtml + '</table>' +
-      '<div class="muted small" style="margin-top:.4rem">' + speakSecLine + ' · ' + accText + '</div>' +
+      '<div class="muted small" style="margin-top:.4rem">' + speakSecLine + ' · ' + L.accLine + '</div>' +
       '<div style="margin-top:.8rem"><b class="small">短板 Top3（附数据证据）：</b>' +
       '<ul class="small" style="margin:.3rem 0 0;padding-left:1.2rem">' + weakHtml + '</ul></div>' +
       '<div style="background:var(--brand-weak);border-radius:10px;padding:.7rem;margin-top:.8rem;font-size:.92rem">💡 <b>建议：</b>' + c.u.esc(cur.advice) + '</div>' +
@@ -1399,16 +1426,6 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       };
     });
 
-    /* 本期报告存档进 state（纯增量字段，随导出备份一起走） */
-    if (off === 0) {
-      st.reportArchive = st.reportArchive || {};
-      st.reportArchive[today] = {
-        days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount,
-        accuracy: cur.accuracy, speakCount: cur.speakCount, essayCount: cur.essayCount,
-        sec: cur.sec, advice: cur.advice
-      };
-      c.store.save();
-    }
   }
 
   /* 报告导出（文本 / JSON）：Blob 下载 */
@@ -3207,7 +3224,9 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<div class="card"><div class="row" style="border:0;padding-top:0"><div class="grow">' +
       '<b>📊 学习报告</b>' +
       '<div class="sub muted">本周 vs 上期：天数/词数/答对率/口语/作文，附行动建议</div></div>' +
-      '<button class="btn small" id="btnWeekly">查看</button></div></div>' +
+      '<button class="btn small" id="btnWeekly">查看</button>' +
+      '<button class="btn small ghost" id="reportTxtBtn" style="margin-left:.4rem">⬇️ 文本</button>' +
+      '<button class="btn small ghost" id="reportJsonBtn" style="margin-left:.3rem">⬇️ JSON</button></div></div>' +
 
       '<div class="card"><h2>💾 备份（换电脑、换手机前一定要看）</h2>' +
       '<div class="muted small" style="margin:.3rem 0 .5rem">🔒 数据只保存在这台设备的浏览器里，不会上传到任何地方。</div>' +
@@ -3285,6 +3304,25 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     $("#btnWeekly", el).onclick = function () {
       var dash = core().dash;
       if (dash && dash.showWeekly) dash.showWeekly(el, 0);
+    };
+    $("#reportTxtBtn", el).onclick = function () {
+      var c2 = core(), st2 = c2.store.get(), today2 = c2.u.todayKey();
+      var blob2 = new Blob([c2.report.exportText(st2, today2, 0)], { type: "text/plain;charset=utf-8" });
+      var a2 = document.createElement("a");
+      a2.href = URL.createObjectURL(blob2);
+      a2.download = "learning-report-" + today2 + ".txt";
+      document.body.appendChild(a2); a2.click();
+      setTimeout(function () { URL.revokeObjectURL(a2.href); a2.remove(); }, 500);
+    };
+    $("#reportJsonBtn", el).onclick = function () {
+      var c3 = core(), st3 = c3.store.get(), today3 = c3.u.todayKey();
+      var js3 = c3.report.exportJson(st3, today3, 0);
+      var blob3 = new Blob([JSON.stringify(js3, null, 2)], { type: "application/json" });
+      var a3 = document.createElement("a");
+      a3.href = URL.createObjectURL(blob3);
+      a3.download = "learning-report-" + today3 + ".json";
+      document.body.appendChild(a3); a3.click();
+      setTimeout(function () { URL.revokeObjectURL(a3.href); a3.remove(); }, 500);
     };
 
     /* 备份：先触发下载并记录备份时间，立即重绘页面（提醒消失+显示上次备份日期），再弹文本兜底框 */
