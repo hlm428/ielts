@@ -452,7 +452,9 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       stats: { days: {} },  /* 每天学习情况：{ sec, newN, revN, right, wrong } */
       speaking: { done: {} },  /* 口语每题练过的次数 */
       writing: { essays: [], drafts: {} }, /* 写作历史与草稿 */
-      plan: { examDate: "", target: "", days: {} }
+      plan: { examDate: "", target: "", days: {} },
+      reports: [],        /* R3 合并：已存档的学习报告摘要（纯增量，老备份缺字段自动补 []） */
+      reportArchive: {}   /* R3 合并：兼容线上 B1 线已有的按日期存档字段，不丢用户历史数据 */
     };
   }
 
@@ -529,19 +531,24 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
   S.get = function () { return state; };
   S.save = persist;
 
-  /* 导出备份：一段 JSON 文本，可存成 .json 文件 */
+  /* 导出备份：一段 JSON 文本，可存成 .json 文件。
+     R3 合并：学习报告摘要存在 state.reports / state.reportArchive，随备份一起走；
+     顶层给出可读期数，让「报告已纳入备份」在文件里直接可见、可断言。 */
   S.exportJson = function () {
     return JSON.stringify({
       app: "ielts-app",
       version: 1,
+      includesReports: true,
+      reportCount: Array.isArray(state.reports) ? state.reports.length : 0,
       exportedAt: window.IELTS.u.todayKey(),
       state: state
     }, null, 1);
   };
 
   /* 导入备份：校验通过后整体替换。
-     成功返回 {ok:true, counts:{words,wrong,speaking,essays}}（恢复报告）；
-     失败返回 {ok:false, error:"指明具体字段的原因"}。 */
+     成功返回 {ok:true, counts:{words,wrong,speaking,essays,reports}}（恢复报告）；
+     失败返回 {ok:false, error:"指明具体字段的原因"}。
+     R3 兼容：老备份没有 reports / reportArchive → defaults() 补默认；字段被改坏 → 容错丢弃，绝不因此拒绝导入。 */
   S.importJson = function (text) {
     var data;
     try { data = JSON.parse(text); }
@@ -563,8 +570,16 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     if (st.writing && (!Array.isArray(st.writing.essays))) {
       return { ok: false, error: "写作历史（writing.essays）不是列表：文件可能被改坏过" };
     }
+    /* R3 纯增量字段容错：不是数组/对象就当作没有这份存档，让 defaults() 补默认值 */
+    if (st.reports !== undefined && !Array.isArray(st.reports)) delete st.reports;
+    if (st.reportArchive !== undefined &&
+        (!st.reportArchive || typeof st.reportArchive !== "object" || Array.isArray(st.reportArchive))) {
+      delete st.reportArchive;
+    }
     var fresh = defaults();
     deepMerge(fresh, st);
+    if (!Array.isArray(fresh.reports)) fresh.reports = [];
+    if (!fresh.reportArchive || typeof fresh.reportArchive !== "object") fresh.reportArchive = {};
     state = fresh;
     persist();
     var wrongN = 0, k;
@@ -575,7 +590,8 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
         words: Object.keys(state.words).length,
         wrong: wrongN,
         speaking: Object.keys(state.speaking.done).length,
-        essays: state.writing.essays.length
+        essays: state.writing.essays.length,
+        reports: state.reports.length
       }
     };
   };
@@ -776,26 +792,59 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
 
 </script>
 <script>
-/* 每周报告（反馈三 + 改进版提示词 T1/T2）：纯函数，数据全部来自本地记录，不联网。
-   weekly(state, todayKey, weekOffset) → 单周指标（0=本期，1=上期，支持翻周）
-   compare(state, todayKey) → 本期 vs 上期对比表 + 短板 Top3 + 行动按钮（报告→行动闭环） */
+/* 每周报告（R3 合并版）：纯函数，数据全部来自本地记录，不联网。
+   合并来源：
+   - 线上 B1 线：byDay 按天精确口语时长 + 近似标注、essaysBreakdown、
+     credibility 的 approx/notAi/source、跳转上下文之外的报告 UI 口径。
+   - 本地 R2 线：残缺数据兜底、跨期口语时长修正、短板与建议/行动一致性、
+     无记录显示 - 而非 0秒、文本/JSON 导出统一口径、报告存档链与隐私约束。
+   双签名兼容：subjects/credibility 第二参数既接受 dates 数组（线上 UI 口径），
+   也接受 todayKey（R2 / 自动化用例口径），返回对象同时含两套字段。 */
 (function () {
-  "use strict";
   var R = {};
 
   function core() { return window.IELTS; }
+  function isArr(x) { return Object.prototype.toString.call(x) === "[object Array]"; }
+  function safeDays(state) {
+    return (state && state.stats && state.stats.days && typeof state.stats.days === "object") ? state.stats.days : {};
+  }
+  function safeDone(state) {
+    return (state && state.speaking && state.speaking.done && typeof state.speaking.done === "object") ? state.speaking.done : {};
+  }
+  function safeEssays(state) {
+    return (state && state.writing && isArr(state.writing.essays)) ? state.writing.essays : [];
+  }
+  function safeWrong(state) {
+    return (state && state.wrong && typeof state.wrong === "object") ? state.wrong : {};
+  }
+  function fmtS(sec) { return core().u.fmtSec(sec || 0); }
+  function strip(w) {
+    return {
+      dates: w.dates, days: w.days, newWords: w.newWords, reviewCount: w.reviewCount,
+      right: w.right, wrong: w.wrong, accuracy: w.accuracy, sec: w.sec,
+      speakCount: w.speakCount, speakSec: w.speakSec, speakSecAll: w.speakSecAll,
+      speakSecApprox: w.speakSecApprox,
+      essayCount: w.essayCount, essayAvgWords: w.essayAvgWords, advice: w.advice
+    };
+  }
+  /* 第二参数：dates 数组（线上 UI）或 todayKey 字符串（R2 用例） */
+  function periodOf(a, b) {
+    if (isArr(a)) return { dates: a.slice(), off: 0, todayKey: a[6] || core().u.todayKey() };
+    var off = Math.max(0, b || 0), today = a || core().u.todayKey(), dates = [];
+    for (var i = off * 7 + 6; i >= off * 7; i--) dates.push(core().u.addDays(today, -i));
+    return { dates: dates, off: off, todayKey: today };
+  }
 
-  /* 单周统计：offset=0 本期（today 往前 7 天含今天），1 上期（再往前 7 天） */
+  /* 单周统计：offset=0 本期（today 往前 7 天含今天），1 上期 */
   R.weekly = function (state, todayKey, weekOffset) {
-    var u = core().u;
-    var off = Math.max(0, weekOffset || 0);
-    var dates = [];
-    for (var i = off * 7 + 6; i >= off * 7; i--) dates.push(u.addDays(todayKey, -i));
+    var p = periodOf(todayKey, weekOffset), dates = p.dates;
+    state = state || {};
+    var daysMap = safeDays(state), doneMap = safeDone(state), essayAll = safeEssays(state);
 
     var days = 0, newWords = 0, reviewCount = 0, right = 0, wrong = 0, sec = 0;
     dates.forEach(function (k) {
-      var d = state.stats.days[k];
-      if (d && ((d.sec || 0) > 0 || (d.right || 0) > 0)) days++;
+      var d = daysMap[k];
+      if (d && typeof d === "object" && ((d.sec || 0) > 0 || (d.right || 0) > 0)) days++;
       newWords += (d && d.newN) || 0;
       reviewCount += (d && d.revN) || 0;
       right += (d && d.right) || 0;
@@ -804,21 +853,27 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     });
     var accuracy = (right + wrong) > 0 ? Math.round((right / (right + wrong)) * 100) : -1;
 
-    var speakCount = 0, speakSec = 0, speakSecApprox = false, k;
-    for (k in state.speaking.done) {
-      var d1 = state.speaking.done[k];
-      if (d1.last && dates.indexOf(d1.last) >= 0) speakCount++;
-      if (d1.byDay) {
-        /* 按天精确口径 */
-        for (var bd in d1.byDay) if (dates.indexOf(bd) >= 0) speakSec += d1.byDay[bd];
-      } else if ((d1.sec || 0) > 0) {
-        /* 旧数据无按天记录：累计值近似（可信度说明会标注） */
+    /* 口语时长（R3）：优先 byDay 按天精确；旧数据无 byDay 时，
+       只有 last 落在本期才把累计 sec 计入本期，并标 speakSecApprox。
+       修掉「40 天前的旧题被算进本期」与「旧记录全量串进本期」两种口径错误。 */
+    var speakCount = 0, speakSec = 0, speakSecAll = 0, speakSecApprox = false, k, bd;
+    for (k in doneMap) {
+      var d1 = doneMap[k];
+      if (!d1 || typeof d1 !== "object") continue;
+      var inPeriod = !!(d1.last && dates.indexOf(d1.last) >= 0);
+      if (inPeriod) speakCount++;
+      if (d1.byDay && typeof d1.byDay === "object") {
+        for (bd in d1.byDay) if (dates.indexOf(bd) >= 0) speakSec += Number(d1.byDay[bd]) || 0;
+      } else if ((d1.sec || 0) > 0 && inPeriod) {
         speakSec += d1.sec || 0;
         speakSecApprox = true;
       }
+      speakSecAll += d1.sec || 0;
     }
+
     var essays = [], essayWords = [];
-    state.writing.essays.forEach(function (e) {
+    essayAll.forEach(function (e) {
+      if (!e || typeof e !== "object") return;
       if (dates.indexOf(e.date) >= 0) {
         essays.push(e);
         essayWords.push(e.words || 0);
@@ -837,6 +892,7 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       speakCount: speakCount,
       speakSec: speakSec,
       speakSecApprox: speakSecApprox,
+      speakSecAll: speakSecAll,
       essays: essays,
       essayCount: essays.length,
       essayAvgWords: essays.length ? Math.round(essayWords.reduce(function (a, b) { return a + b; }, 0) / essays.length) : 0
@@ -845,28 +901,29 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     return out;
   };
 
-  /* 一句跟数据挂钩的建议（引用本期真实数据，禁止与数据无关的通用话）。
-     cur = weekly 的返回对象。 */
+  /* 一句跟数据挂钩的建议（引用本期真实数据，禁止通用话） */
   R.advice = function (state, cur) {
     var days = cur.days, newWords = cur.newWords, accuracy = cur.accuracy,
         speakCount = cur.speakCount, essayCount = cur.essayCount,
         right = cur.right || 0, wrong = cur.wrong || 0;
-    var touched = 0, k;
-    for (k in state.words) touched++;
+    state = state || {};
+    var touched = 0, k, wordsMap = state.words || {};
+    for (k in wordsMap) if (wordsMap[k]) touched++;
     if (days === 0 && touched === 0) return "本周还没有学习记录——从每天 10 个新词的小目标开始，5 分钟也算打卡。";
     if (days === 0) return "本周有 " + touched + " 个词的记录但还没学习，错词和复习正在过期，先回到背单词页清一轮。";
     if (speakCount === 0) return "本周学了 " + days + " 天共 " + newWords + " 个新词，但口语 0 题——每天挑 1 道题开口说，考试才不慌。";
     if (essayCount === 0) return "本周练了 " + speakCount + " 道口语但还没写作文——隔天写一篇并看本地检查报告，提分最快。";
     if (accuracy >= 0 && accuracy < 70) return "本周答对率 " + accuracy + "%（对 " + (right + wrong) + " 题错 " + wrong + " 题），先去错词本清一轮再背新词。";
     if (days <= 3) return "本周学了 " + days + " 天，节奏偏松；把频率提到 5 天以上，记忆连接会更牢。";
-    var wrongN = 0;
-    for (k in state.wrong) if (state.wrong[k] && !state.wrong[k].cleared) wrongN++;
+    var wrongN = 0, wrongMap = safeWrong(state);
+    for (k in wrongMap) if (wrongMap[k] && !wrongMap[k].cleared) wrongN++;
     if (wrongN > 0) return "本周节奏不错，错词本里还剩 " + wrongN + " 个词，优先消化它们再上新词。";
     return "本周学 " + days + " 天、背 " + newWords + " 词、练 " + speakCount + " 道口语，节奏很稳——下周可把每日新词加 2 个试试。";
   };
 
-  /* 短板 Top3：每条附证据（字段来源），按影响排序 */
-  R.weakTop = function (cur, prev) {
+  /* 短板 Top3：每条附证据。第 3 参数 state 用于消除
+     「短板说没有明显短板，但建议和一键行动却在催清错词本」的自相矛盾。 */
+  R.weakTop = function (cur, prev, state) {
     var list = [];
     if (cur.days <= 2) list.push({ t: "学习天数少", e: "本期仅 " + cur.days + " 天（来源 stats.days.sec）" });
     if (cur.speakCount === 0) list.push({ t: "口语零练习", e: "speaking.done.last 均不在本期" });
@@ -874,20 +931,27 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     if (cur.accuracy >= 0 && cur.accuracy < 70) list.push({ t: "答对率偏低", e: "right " + cur.right + " / wrong " + cur.wrong + "（stats.days）" });
     if (prev && prev.days > cur.days) list.push({ t: "比上期退步", e: "上期 " + prev.days + " 天 → 本期 " + cur.days + " 天" });
     if (cur.reviewCount === 0 && cur.newWords > 0) list.push({ t: "只背不复习", e: "revN 本期累计 0" });
+    if (!list.length && state) {
+      var wn = 0, k, wrongMap = safeWrong(state);
+      for (k in wrongMap) if (wrongMap[k] && !wrongMap[k].cleared) wn++;
+      if (wn > 0) list.push({ t: "错词本未清空", e: "state.wrong 里还有 " + wn + " 个未标记 cleared 的词；建议与一键行动据此生成" });
+    }
     return list.slice(0, 3);
   };
 
-  /* 对比表行（本周与任意上一周对比时复用） */
+  /* 对比表行：某期完全无记录时该期学习时长显示 -，不写「0秒」制造假象 */
   R.rows = function (cur, prev) {
     var rows = [];
-    function row(name, a, b, fmt) {
-      var fa = fmt ? fmt(a) : a, fb = fmt ? fmt(b) : b;
+    function row(name, a, b, fmt, blankA, blankB) {
+      var fa = blankA ? "-" : (fmt ? fmt(a) : a);
+      var fb = blankB ? "-" : (fmt ? fmt(b) : b);
       rows.push({ name: name, cur: fa, prev: fb, delta: a - b });
     }
     row("学习天数", cur.days, prev.days);
     row("新增单词", cur.newWords, prev.newWords);
     row("复习次数", cur.reviewCount, prev.reviewCount);
-    row("学习时长", cur.sec, prev.sec, function (x) { return core().u.fmtSec(x); });
+    row("学习时长", cur.sec, prev.sec, function (x) { return fmtS(x); },
+      cur.days === 0 && cur.sec === 0, prev.days === 0 && prev.sec === 0);
     row("口语题数", cur.speakCount, prev.speakCount);
     row("作文篇数", cur.essayCount, prev.essayCount);
     var a = cur.accuracy, b = prev.accuracy;
@@ -900,92 +964,107 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     return rows;
   };
 
-  /* 本期 vs 上期 对比 + 行动闭环（一键转计划/错词本/作文） */
+  /* 本期 vs 上期对比 + 行动闭环 */
   R.compare = function (state, todayKey) {
+    state = state || {};
     var cur = R.weekly(state, todayKey, 0);
     var prev = R.weekly(state, todayKey, 1);
     var actions = [];
     if (cur.speakCount === 0) actions.push({ label: "🎙️ 去练 1 道口语", hash: "speak" });
     if (cur.essayCount === 0) actions.push({ label: "✍️ 补一篇作文", hash: "write" });
-    var wrongN = 0, k;
-    for (k in state.wrong) if (state.wrong[k] && !state.wrong[k].cleared) wrongN++;
+    var wrongN = 0, k, wrongMap = safeWrong(state);
+    for (k in wrongMap) if (wrongMap[k] && !wrongMap[k].cleared) wrongN++;
     if (wrongN > 0) actions.push({ label: "❌ 清错词本（" + wrongN + " 个）", hash: "vocab" });
     actions.push({ label: "🗓️ 把建议写进今天的计划", hash: "plan" });
-    return { cur: cur, prev: prev, rows: R.rows(cur, prev), weak: R.weakTop(cur, prev), actions: actions };
+    return { cur: cur, prev: prev, rows: R.rows(cur, prev), weak: R.weakTop(cur, prev, state), actions: actions };
   };
 
-  /* 把周报建议一键写进今天的计划（返回新增任务名，供 toast 展示） */
+  /* 一键写进今天的计划（残缺 plan / days / tasks 一律兜底） */
   R.addAdviceToPlan = function (state, todayKey) {
+    state = state || {};
     var cur = R.weekly(state, todayKey, 0);
     var tasks = [];
     if (cur.speakCount === 0) tasks.push("口语练 1 题（周报建议）");
     if (cur.essayCount === 0) tasks.push("写 1 篇作文（周报建议）");
     if (cur.accuracy >= 0 && cur.accuracy < 70) tasks.push("清一轮错词本（周报建议）");
     if (!tasks.length) tasks.push("保持本周节奏：复习 " + Math.max(1, cur.reviewCount || 5) + " 个旧词（周报建议）");
+    if (!state.plan || typeof state.plan !== "object") state.plan = { examDate: "", target: "", days: {} };
+    if (!state.plan.days || typeof state.plan.days !== "object") state.plan.days = {};
     var day = state.plan.days[todayKey];
-    if (!day) day = state.plan.days[todayKey] = { tasks: [] };
+    if (!day || typeof day !== "object") day = state.plan.days[todayKey] = { tasks: [] };
+    if (!isArr(day.tasks)) day.tasks = [];
     var added = 0;
     tasks.forEach(function (name) {
-      var exists = day.tasks.some(function (t) { return t.name === name; });
+      var exists = day.tasks.some(function (t) { return t && t.name === name; });
       if (!exists) { day.tasks.push({ name: name, done: false, kind: "review" }); added++; }
     });
-    if (added) core().stats && core().store.save();
+    if (added && core().store) core().store.save();
     return added;
   };
 
-  /* ---------- B1：报告导出与专项 + 单一判定源 ---------- */
+  /* ---------- 专项 / 可信度（双签名兼容） ---------- */
 
-  /* 单一判定源（R4 补强）：零样本/口径/可信度的判定只在这里做一次，
-     弹窗渲染与 exportText 都消费 subjectLines 的输出，禁止各拼一套。 */
-  R.subjectLines = function (state, cur) {
-    var cred = R.credibility(state, cur.dates, cur);
-    var sub = R.subjects(state, cur.dates);
-    var eb = R.essaysBreakdown(state, cur.dates);
+  /* 反查题库记录：同时支持 itemId（线上口径）与 s<下标>（R2 口径） */
+  function lookupQuestion(id, bank) {
+    var i, c = core();
+    if (c.speak && c.speak.itemId) {
+      for (i = 0; i < bank.length; i++) if (c.speak.itemId(i) === id) return bank[i];
+    }
+    if (/^s\d+$/.test(String(id))) return bank[parseInt(String(id).slice(1), 10)] || null;
+    return null;
+  }
+
+  /* 口语专项：Part 分布 + 话题覆盖；写作专项：达标率 + 字数趋势。
+     返回对象同时含线上字段（p1/p2/p3/topicCount）与 R2 字段（speaking/writing）。 */
+  R.subjects = function (state, a, b) {
+    state = state || {};
+    var p = periodOf(a, b), dates = p.dates;
+    var cur = R.weekly(state, p.todayKey, p.off);
+    var doneMap = safeDone(state), bank = (window.IELTS_DATA && window.IELTS_DATA.SPEAKING) || [];
+    var parts = { 1: 0, 2: 0, 3: 0 }, topics = {}, id;
+    for (id in doneMap) {
+      var rec0 = doneMap[id];
+      if (!rec0 || !rec0.last || dates.indexOf(rec0.last) < 0) continue;
+      var q = lookupQuestion(id, bank);
+      if (!q) continue;
+      if (q.part === 1 || q.part === 2 || q.part === 3) parts[q.part]++;
+      else parts[1]++;
+      if (q.topic) topics[q.topic] = 1;
+    }
+    var byType = { "Task 1": 0, "Task 2": 0 }, okN = 0, trend = [];
+    (cur.essays || []).forEach(function (e) {
+      if (!e) return;
+      if (e.type === "Task 1" || e.type === "Task 2") byType[e.type]++;
+      var target = e.type === "Task 2" ? 250 : 150;
+      if ((e.words || 0) >= target) okN++;
+      trend.push({ date: e.date, words: e.words || 0, type: e.type || "Task 1" });
+    });
+    trend.sort(function (x, y) { return x.date < y.date ? -1 : (x.date > y.date ? 1 : 0); });
+    var eb = R.essaysBreakdown(state, dates);
     return {
-      speakSecLine: cur.speakSec > 0
-        ? "口语时长 " + core().u.fmtSec(cur.speakSec) + (cur.speakSecApprox ? "（近似值，旧版未按天记录）" : "")
-        : "本期无口语练习",
-      accLine: cur.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + cur.accuracy + "%",
-      essayLine: eb.count > 0
-        ? "Task1 " + eb.t1 + " 篇 + Task2 " + eb.t2 + " 篇，平均 " + eb.avg + " 词，达标 " + eb.okCount + " 篇"
-        : "本期无作文（样本不足，不显示平均字数）",
-      credLine: "口径：答对率=right/(right+wrong)；无样本显示 -；" + cred.notAi + "。",
-      approxLine: cred.approx,
-      subjects: sub,
-      essaysBreakdown: eb,
-      credibility: cred
+      p1: parts[1], p2: parts[2], p3: parts[3], topicCount: Object.keys(topics).length,
+      speaking: {
+        count: cur.speakCount, sec: cur.speakSec,
+        avgSec: cur.speakCount ? Math.round(cur.speakSec / cur.speakCount) : 0,
+        parts: parts, topicCoverage: Object.keys(topics).length,
+        note: "按 speaking.done[id].last 落在本期统计；id = s<题库下标>"
+      },
+      writing: {
+        count: cur.essayCount, avgWords: cur.essayAvgWords, byType: byType,
+        wordsOkRate: cur.essayCount ? Math.round(okN / cur.essayCount * 100) : -1,
+        trend: trend,
+        note: "达标线：Task 1 ≥150 词 / Task 2 ≥250 词；不含作文原文"
+      },
+      essays: eb
     };
   };
 
-
-  /* 口语专项：Part 分布、话题覆盖、本期题数 */
-  R.subjects = function (state, dates) {
-    var p1 = 0, p2 = 0, p3 = 0, topics = {}, k;
-    var speaking = (window.IELTS_DATA && window.IELTS_DATA.SPEAKING) || [];
-    for (k in state.speaking.done) {
-      var d = state.speaking.done[k];
-      if (!d.last || dates.indexOf(d.last) < 0) continue;
-      var rec = null;
-      for (var i = 0; i < speaking.length; i++) {
-        if (core().speak.itemId(i) === k) { rec = speaking[i]; break; }
-      }
-      var part = rec ? rec.part : 1;
-      if (part === 1) p1++;
-      else if (part === 2) p2++;
-      else if (part === 3) p3++;
-      else p1++;
-      if (rec && rec.topic) topics[rec.topic] = 1;
-    }
-    var topicCount = 0;
-    for (k in topics) topicCount++;
-    return { p1: p1, p2: p2, p3: p3, topicCount: topicCount };
-  };
-
-  /* 写作专项：本期篇数、字数列表、达标数、平均字数、Task 分布 */
+  /* 写作专项（线上 B1 原生结构）：篇数、Task 分布、达标数、平均字数 */
   R.essaysBreakdown = function (state, dates) {
     var list = [], t1 = 0, t2 = 0, okCount = 0;
-    state.writing.essays.forEach(function (e) {
-      if (dates.indexOf(e.date) >= 0) {
+    safeEssays(state).forEach(function (e) {
+      if (!e || typeof e !== "object") return;
+      if (!dates || dates.indexOf(e.date) >= 0) {
         list.push(e.words || 0);
         if (e.type === "Task 1") t1++; else t2++;
         if (e.ok) okCount++;
@@ -993,27 +1072,59 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     });
     return {
       count: list.length, t1: t1, t2: t2, okCount: okCount, words: list,
-      avg: list.length ? Math.round(list.reduce(function (a, b) { return a + b; }, 0) / list.length) : 0
+      avg: list.length ? Math.round(list.reduce(function (x, y) { return x + y; }, 0) / list.length) : 0
     };
   };
 
-  /* 数据可信度说明（口径必须印在报告里） */
-  R.credibility = function (state, dates, cur) {
-    var days = 0, i;
-    for (i = 0; i < dates.length; i++) {
-      var d = state.stats.days[dates[i]];
-      if (d && ((d.sec || 0) > 0 || (d.right || 0) > 0)) days++;
+  /* 数据可信度：样本天数、缺失项、口径说明，不伪装成官方评分。
+     第二参数既可是 dates 数组（线上 UI：credibility(st, cur.dates, cur)），
+     也可是 todayKey（R2 用例）。返回对象同时含两套字段。 */
+  R.credibility = function (state, a, b) {
+    state = state || {};
+    var dates, cur, off;
+    if (isArr(a)) {
+      dates = a.slice();
+      cur = (b && typeof b === "object" && "days" in b) ? b : null;
+      off = 0;
+    } else {
+      var p = periodOf(a, b);
+      dates = p.dates; off = p.off;
+      cur = R.weekly(state, p.todayKey, p.off);
     }
-    var allByDay = true, anySpeak = false, k;
-    for (k in state.speaking.done) {
+    var daysMap = safeDays(state), sampleDays = 0;
+    dates.forEach(function (k) {
+      var d = daysMap[k];
+      if (d && typeof d === "object" && ((d.sec || 0) > 0 || (d.right || 0) > 0)) sampleDays++;
+    });
+    if (!cur) cur = R.weekly(state, dates[6] || core().u.todayKey(), 0);
+    var missing = [];
+    if (sampleDays === 0) missing.push("本期没有学习时长记录");
+    if (cur.accuracy < 0) missing.push("本期无答题样本，答对率不可用");
+    if (cur.speakCount === 0) missing.push("本期无口语记录");
+    if (cur.essayCount === 0) missing.push("本期无作文记录");
+    if (cur.reviewCount === 0) missing.push("本期无复习记录");
+
+    var anySpeak = false, allByDay = true, k, doneMap = safeDone(state);
+    for (k in doneMap) {
       anySpeak = true;
-      if (!state.speaking.done[k].byDay) allByDay = false;
+      if (!doneMap[k] || !doneMap[k].byDay) allByDay = false;
     }
-    var approx = anySpeak && allByDay ? "口语时长为按天精确记录"
-      : anySpeak ? "口语时长为近似值（部分记录未按天拆分，显示总量仅供参考）"
-      : "本周无口语时长记录";
+    var approx = cur.speakSecApprox || (anySpeak && !allByDay)
+      ? "口语时长为近似值（部分记录未按天拆分，显示总量仅供参考）"
+      : anySpeak ? "口语时长为按天精确记录" : "本周无口语时长记录";
+    /* R3 实读修复：本期没有口语记录时不要再讲 byDay / 近似口径，
+       否则与「本周无口语时长记录」自相矛盾（模板话术会被误读为有数据）。 */
+    var speakNote = !anySpeak
+      ? "本期没有口语练习记录，不产生口语时长口径。"
+      : (cur.speakSecApprox || !allByDay)
+        ? "口语时长为近似值：部分旧记录未按天拆分，仅按「最近练习落在本期」累计，可能含本期之前的练习。"
+        : "口语时长按 byDay 按天精确统计，只计入落在本期的天数。";
     return {
-      sampleDays: days,
+      sampleDays: sampleDays,
+      periodDays: 7,
+      missing: missing,
+      note: "样本 " + sampleDays + "/7 天；数据全部来自本机 localStorage，按规则生成，" +
+        "不是雅思官方评分、AI 精批或预测分数，也不联网。" + speakNote,
       totalKnown: 1596,
       approx: approx,
       notAi: "本报告由本地规则生成，不是雅思官方评分、AI 精批或预测分数",
@@ -1021,59 +1132,199 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     };
   };
 
-  /* 报告纯文本导出：消费 subjectLines 单一判定源（R4：禁止另拼一套） */
-  R.exportText = function (state, todayKey, weekOffset) {
-    var cur = R.weekly(state, todayKey, weekOffset || 0);
-    var prev = R.weekly(state, todayKey, (weekOffset || 0) + 1);
-    var L = R.subjectLines(state, cur);
-    var rows = R.rows(cur, prev);
-    var weak = R.weakTop(cur, prev);
-    var out = [];
-    out.push("雅思随身背 · 学习测评报告");
-    out.push("周期：" + cur.dates[0] + " ~ " + cur.dates[6] + "（本期）");
-    out.push("");
-    out.push("【核心指标】本期 / 上期");
-    rows.forEach(function (r) {
-      var pv = r.prev === "0秒" || r.prev === 0 ? "无记录" : r.prev;
-      out.push("- " + r.name + "：" + r.cur + "（上期 " + pv + "）");
-    });
-    out.push("");
-    out.push("【口语专项】Part1 " + L.subjects.p1 + " 题 · Part2 " + L.subjects.p2 + " 题 · Part3 " + L.subjects.p3 + " 题 · 话题覆盖 " + L.subjects.topicCount + " 个");
-    out.push("【写作专项】" + L.essayLine + (L.essaysBreakdown.words.length ? "；字数：" + L.essaysBreakdown.words.join(", ") : ""));
-    out.push("");
-    out.push("【短板 Top3】");
-    var weakList = weak.length ? weak : [{ t: "本期没有明显短板", e: "" }];
-    weakList.forEach(function (w) { out.push("- " + w.t + (w.e ? "（" + w.e + "）" : "")); });
-    out.push("");
-    out.push("【建议】" + cur.advice);
-    out.push("");
-    out.push("【数据可信度】样本天数 " + L.credibility.sampleDays + "/7；" + L.credibility.approx + "；" + L.credibility.notAi + "；" + L.credibility.source);
-    return out.join("\n");
+  /* R4 实读修复：专项区文案的**唯一判定源**。
+     R3 只修了 exportText 的零样本文案，弹窗 showWeekly 自己另拼了一套 HTML，
+     结果用户实际看到的弹窗仍显示「0秒 / 平均 0秒/题 / 平均 0 词」，
+     而 143 条工程用例与产品样例都只验文本导出，全部照漏。
+     现在弹窗与文本导出共用 hasSpeak / hasEssay 判定，杜绝再次分叉。 */
+  R.subjectLines = function (state, a, b) {
+    state = state || {};
+    /* R5 合并：三种调用方式归一到同一套判定，杜绝分叉后再次出现「两套口径」。
+       线上 R5 线传 (state, cur)；本地 R2/R4 线传 (state, todayKey, off) 或 (state, dates)。 */
+    var curArg = null;
+    if (a && !isArr(a) && typeof a === "object" && isArr(a.dates)) {
+      curArg = a; a = a.dates; b = 0;
+    }
+    var sub = R.subjects(state, a, b);
+    var hasSpeak = sub.speaking.count > 0, hasEssay = sub.writing.count > 0;
+    var u = core().u;
+    var p = periodOf(a, b);
+    var cur = curArg || R.weekly(state, p.todayKey, p.off);
+    var eb = R.essaysBreakdown(state, p.dates);
+    var cred = R.credibility(state, p.dates, cur);
+    return {
+      /* 本地 R4 字段：弹窗与文本导出共用 */
+      hasSpeak: hasSpeak, hasEssay: hasEssay,
+      speaking: hasSpeak
+        ? "口语 Part1/2/3 = " + sub.p1 + "/" + sub.p2 + "/" + sub.p3 +
+          " · 话题覆盖 " + sub.topicCount + " 个 · " + u.fmtSec(sub.speaking.sec) +
+          "（平均 " + u.fmtSec(sub.speaking.avgSec) + "/题）"
+        : "本期无口语练习，时长与平均时长显示为 -（不适用）",
+      writing: hasEssay
+        ? "写作 Task1/2 = " + sub.writing.byType["Task 1"] + "/" + sub.writing.byType["Task 2"] +
+          " 篇 · 平均 " + sub.writing.avgWords + " 词 · 达标率 " +
+          (sub.writing.wordsOkRate < 0 ? "-" : sub.writing.wordsOkRate + "%")
+        : "本期无作文，平均字数与达标率显示为 -（不适用）",
+      /* 线上 R5 字段：让另一条迭代线的调用方也能消费同一份判定结果 */
+      speakSecLine: cur.speakSec > 0
+        ? "口语时长 " + u.fmtSec(cur.speakSec) + (cur.speakSecApprox ? "（近似值，旧版未按天记录）" : "")
+        : "本期无口语练习",
+      accLine: cur.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + cur.accuracy + "%",
+      essayLine: eb.count > 0
+        ? "Task1 " + eb.t1 + " 篇 + Task2 " + eb.t2 + " 篇，平均 " + eb.avg + " 词，达标 " + eb.okCount + " 篇"
+        : "本期无作文（样本不足，不显示平均字数）",
+      credLine: "口径：答对率=right/(right+wrong)；无样本显示 -；" + cred.notAi + "。",
+      approxLine: cred.approx,
+      subjects: sub, essaysBreakdown: eb, credibility: cred
+    };
   };
 
-  /* 报告 JSON 导出（与 exportText 同源，供存档/外部查看） */
-  R.exportJson = function (state, todayKey, weekOffset) {
-    var cur = R.weekly(state, todayKey, weekOffset || 0);
-    return {
-      period: [cur.dates[0], cur.dates[6]],
-      metrics: {
-        days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount,
-        accuracy: cur.accuracy, sec: cur.sec, speakCount: cur.speakCount,
-        essayCount: cur.essayCount, essayAvgWords: cur.essayAvgWords
+  /* 纯文本报告：六段必备 + 可读时长 + 无样本显示 - + 隐私口径 */
+  R.exportText = function (state, todayKey, off) {
+    state = state || {};
+    var n = off || 0;
+    var cur = R.weekly(state, todayKey, n);
+    var prev = R.weekly(state, todayKey, n + 1);
+    var cred = R.credibility(state, todayKey, n);
+    var sub = R.subjects(state, todayKey, n);
+    var lines = R.subjectLines(state, todayKey, n); /* R4：与弹窗共用零样本判定 */
+    var L = [];
+    L.push("雅思随身背 · 学习报告（本地规则生成，非雅思官方评分）");
+    L.push("周期：" + cur.dates[0] + " ~ " + cur.dates[6] + (n ? "（往前第 " + n + " 周）" : "（本期）"));
+    L.push("生成日期：" + (todayKey || cur.dates[6]));
+    L.push("");
+    L.push("【核心指标：本期 / 上期 / 变化】");
+    R.rows(cur, prev).forEach(function (r) {
+      var d = r.delta, dt;
+      if (r.name === "答对率" && (cur.accuracy < 0 || prev.accuracy < 0)) dt = "-";
+      else if (r.name === "学习时长") {
+        if (cur.sec === 0 && cur.days === 0 && prev.sec === 0 && prev.days === 0) dt = "-";
+        else dt = (d > 0 ? "+" : d < 0 ? "-" : "") + fmtS(Math.abs(d));
+      } else dt = (d > 0 ? "+" + d : String(d));
+      L.push("· " + r.name + "：" + r.cur + " / " + r.prev + " / " + dt);
+    });
+    L.push("");
+    L.push("【短板 Top3（附数据证据）】");
+    var weak = R.weakTop(cur, prev, state);
+    if (!weak.length) L.push("· 本期没有明显短板，继续保持。");
+    weak.forEach(function (w, i) { L.push((i + 1) + ". " + w.t + " — " + w.e); });
+    L.push("");
+    /* R3 实读修复：零样本时专项区不显示「0秒 / 平均 0 词」这种造数，
+       与核心指标「无记录显示 -」保持同一口径。 */
+    L.push(lines.hasSpeak
+      ? "【口语专项】" + sub.speaking.count + " 题 · " + fmtS(sub.speaking.sec) +
+        " · 平均 " + fmtS(sub.speaking.avgSec) + "/题 · Part1/2/3 = " +
+        sub.speaking.parts[1] + "/" + sub.speaking.parts[2] + "/" + sub.speaking.parts[3] +
+        " · 话题覆盖 " + sub.speaking.topicCoverage + " 个" +
+        (cur.speakSecApprox ? "（近似值，旧版未按天记录）" : "")
+      : "【口语专项】0 题 · 本期无口语练习，时长与平均时长显示为 -（不适用）");
+    L.push(lines.hasEssay
+      ? "【写作专项】" + sub.writing.count + " 篇 · 平均 " + sub.writing.avgWords +
+        " 词 · 达标率 " + (sub.writing.wordsOkRate < 0 ? "-" : sub.writing.wordsOkRate + "%") +
+        " · Task1/2 = " + sub.writing.byType["Task 1"] + "/" + sub.writing.byType["Task 2"] +
+        " · 字数：" + (sub.essays.words.length ? sub.essays.words.join(", ") : "无")
+      : "【写作专项】0 篇 · 本期无作文，平均字数与达标率显示为 -（不适用）");
+    L.push("");
+    L.push("【建议】" + cur.advice);
+    L.push("");
+    if (n === 0) {
+      L.push("【一键行动】");
+      R.compare(state, todayKey).actions.forEach(function (a) { L.push("· " + a.label); });
+      L.push("");
+    }
+    L.push("【数据可信度】" + cred.note);
+    /* R5 实读修复：cred.note 已包含样本天数、近似口径、非官方评分/不联网声明。
+       下一行只补 note 没有的「数据来源 + 缺失项」，末尾口径行只讲计算公式，
+       不再把同三句话重复两到三遍（工程断言只查「有没有」，查不出冗余）。 */
+    L.push(cred.source + (cred.missing.length ? "；缺失项：" + cred.missing.join("；") : ""));
+    L.push("");
+    L.push("口径：答对率 = right/(right+wrong)，无样本显示 -；某期完全无记录时该期学习时长也显示 -，" +
+      "时长变化按绝对秒数差计算。");
+    return L.join("\n");
+  };
+
+  /* 结构化 JSON 报告（字符串；不含作文原文，避免隐私外带） */
+  R.exportJson = function (state, todayKey, off) {
+    state = state || {};
+    var n = off || 0;
+    var cur = R.weekly(state, todayKey, n);
+    var prev = R.weekly(state, todayKey, n + 1);
+    var sub = R.subjects(state, todayKey, n);
+    return JSON.stringify({
+      app: "ielts-report",
+      version: 1,
+      generatedAt: todayKey || cur.dates[6],
+      period: { from: cur.dates[0], to: cur.dates[6], weekOffset: n },
+      report: {
+        metrics: { cur: strip(cur), prev: strip(prev) },
+        rows: R.rows(cur, prev),
+        weak: R.weakTop(cur, prev, state),
+        advice: cur.advice,
+        actions: n === 0 ? R.compare(state, todayKey).actions : [],
+        credibility: R.credibility(state, todayKey, n),
+        subjects: sub,
+        essaysWords: sub.essays.words
       },
-      subjects: R.subjects(state, cur.dates),
-      essaysWords: R.essaysBreakdown(state, cur.dates).words,
-      weakTop: R.weakTop(cur, R.weekly(state, todayKey, (weekOffset || 0) + 1)),
-      advice: cur.advice,
-      credibility: R.credibility(state, cur.dates, cur),
-      generatedBy: "local rules, not AI"
+      generatedBy: "local rules, not AI",
+      disclaimer: "本地规则生成，非雅思官方评分；仅含统计，不含作文原文。"
+    }, null, 2);
+  };
+
+  /* ---------- 报告存档（R2 存档链 + 线上 reportArchive 兼容） ---------- */
+  R.snapshot = function (state, todayKey, off) {
+    var d = JSON.parse(R.exportJson(state, todayKey, off));
+    return {
+      key: d.period.from + "_" + d.period.to,
+      savedAt: todayKey || d.period.to,
+      period: d.period,
+      metrics: d.report.metrics,
+      weak: d.report.weak,
+      advice: d.report.advice,
+      actions: d.report.actions,
+      credibility: d.report.credibility,
+      subjects: d.report.subjects,
+      disclaimer: d.disclaimer
     };
+  };
+
+  /* 存档：同一周期覆盖不重复堆积，最多 8 期（新的在前）。
+     同时写 state.reports（新）与 state.reportArchive（线上 B1 老字段），
+     保证线上 22:54 那版已产生的用户数据不丢、不重复。 */
+  R.archive = function (state, todayKey, off) {
+    if (!state || typeof state !== "object") return { added: 0, total: 0 };
+    if (!isArr(state.reports)) state.reports = [];
+    var snap = R.snapshot(state, todayKey, off);
+    var idx = -1, i;
+    for (i = 0; i < state.reports.length; i++) {
+      if (state.reports[i] && state.reports[i].key === snap.key) { idx = i; break; }
+    }
+    if (idx >= 0) state.reports[idx] = snap;
+    else state.reports.unshift(snap);
+    if (state.reports.length > 8) state.reports.length = 8;
+
+    var cur = snap.metrics && snap.metrics.cur ? snap.metrics.cur : {};
+    if (!state.reportArchive || typeof state.reportArchive !== "object") state.reportArchive = {};
+    state.reportArchive[todayKey || snap.savedAt] = {
+      days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount,
+      accuracy: cur.accuracy, speakCount: cur.speakCount, essayCount: cur.essayCount,
+      sec: cur.sec, advice: snap.advice
+    };
+
+    var c = core();
+    if (c.store && c.store.save) c.store.save();
+    return { added: idx >= 0 ? 0 : 1, total: state.reports.length };
+  };
+
+  R.archivedCount = function (state) {
+    var n = (state && isArr(state.reports)) ? state.reports.length : 0;
+    var legacy = (state && state.reportArchive && typeof state.reportArchive === "object")
+      ? Object.keys(state.reportArchive).length : 0;
+    return Math.max(n, legacy);
   };
 
   window.IELTS = window.IELTS || {};
   window.IELTS.report = R;
 })();
-
 </script>
 <script>
 /* 朗读：用浏览器自带的英文朗读，英音优先。 */
@@ -1346,19 +1597,9 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
     var cur = c.report.weekly(st, today, off);
     var prev = c.report.weekly(st, today, off + 1);
     var rows = c.report.rows(cur, prev);
-    var weak = c.report.weakTop(cur, prev);
-    var L = c.report.subjectLines(st, cur); /* 单一判定源（R4）：弹窗只消费它的行文案 */
-    var cred = L.credibility;
-    /* 副作用前置（R4）：本期报告存档必须在生成 HTML 之前，否则按钮显示滞后一帧 */
-    if (off === 0) {
-      st.reportArchive = st.reportArchive || {};
-      st.reportArchive[today] = {
-        days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount,
-        accuracy: cur.accuracy, speakCount: cur.speakCount, essayCount: cur.essayCount,
-        sec: cur.sec, advice: cur.advice
-      };
-      c.store.save();
-    }
+    var weak = c.report.weakTop(cur, prev, st);
+    var cred = c.report.credibility(st, cur.dates, cur);
+    var accText = cur.accuracy < 0 ? "本周还没有答题记录" : "本周答对率 " + cur.accuracy + "%";
     var mask = document.getElementById("mask"), box = document.getElementById("maskBox");
 
     var rowsHtml = rows.map(function (r) {
@@ -1378,7 +1619,24 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
           return '<button class="btn small" data-act="' + a.hash + '" style="margin:.3rem .3rem 0 0">' + a.label + '</button>';
         }).join("")
       : "";
-    var speakSecLine = L.speakSecLine;
+    var speakSecLine = cur.speakSec
+      ? '口语时长 ' + c.u.fmtSec(cur.speakSec) + (cur.speakSecApprox ? '（近似值，旧版未按天记录）' : '')
+      : '本期无口语练习';
+    /* R4 实读修复：专项区改走 report.subjectLines（与导出文本共用零样本判定），
+       零口语/零作文时不再显示「0秒 / 平均 0秒/题 / 平均 0 词」这类造数。 */
+    var lines = c.report.subjectLines(st, cur.dates);
+    var subHtml = '<div style="margin-top:.8rem"><b class="small">专项报告：</b>' +
+      '<div class="muted small" style="margin-top:.25rem">' + c.u.esc(lines.speaking) + '</div>' +
+      '<div class="muted small" style="margin-top:.2rem">' + c.u.esc(lines.writing) + '</div></div>';
+    /* R3 合并：可信度区（样本天数、缺失项、口径、非官方评分声明） */
+    var credHtml = '<div class="muted small" style="margin-top:.7rem">数据可信度 · 样本天数 ' +
+      cred.sampleDays + '/7；' + c.u.esc(cred.approx) + '；' + c.u.esc(cred.notAi) + '。' +
+      (cred.missing.length ? '<br>缺失项：' + c.u.esc(cred.missing.join("；")) : '') +
+      '<br>口径：答对率=right/(right+wrong)；无样本显示 -；数据不足时不臆造分数；全部数据来自本机记录，不联网。</div>';
+
+    /* R4 实读修复：自动存档必须在生成 HTML **之前**。
+       原先写在函数末尾，导致按钮「已有 N 期」显示的是存档前的旧值，永远滞后一期。 */
+    if (off === 0) c.report.archive(st, today, off);
 
     box.innerHTML =
       '<h3 style="margin:0 0 .6rem">📊 学习报告（' +
@@ -1386,26 +1644,33 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<table style="width:100%;border-collapse:collapse;font-size:.9rem">' +
       '<tr style="color:var(--muted)"><th style="text-align:left">指标</th><th>' + (off ? "该周" : "本期") + '</th><th>上期</th><th>变化</th></tr>' +
       rowsHtml + '</table>' +
-      '<div class="muted small" style="margin-top:.4rem">' + speakSecLine + ' · ' + L.accLine + '</div>' +
+      '<div class="muted small" style="margin-top:.4rem">' + speakSecLine + ' · ' + accText + '</div>' +
       '<div style="margin-top:.8rem"><b class="small">短板 Top3（附数据证据）：</b>' +
       '<ul class="small" style="margin:.3rem 0 0;padding-left:1.2rem">' + weakHtml + '</ul></div>' +
       '<div style="background:var(--brand-weak);border-radius:10px;padding:.7rem;margin-top:.8rem;font-size:.92rem">💡 <b>建议：</b>' + c.u.esc(cur.advice) + '</div>' +
       (off === 0 && actHtml ? '<div style="margin-top:.7rem"><b class="small">一键行动：</b><div style="margin-top:.3rem">' + actHtml + '</div></div>' : '') +
-      '<div class="muted small" style="margin-top:.7rem">口径：答对率=right/(right+wrong)；无样本显示 -；' + c.u.esc(cred.notAi) + '。</div>' +
+      subHtml + credHtml +
       '<div class="btns" style="flex-wrap:wrap">' +
       '<button class="btn ghost" id="repPrev">◀ 上一周</button>' +
       (off > 0 ? '<button class="btn ghost" id="repNext">回到本期 ▶</button>' : '') +
-      '<button class="btn ghost" id="repTxt">⬇️ 文本</button>' +
-      '<button class="btn ghost" id="repJson">⬇️ JSON</button>' +
-      '<button class="btn" id="repClose">好的</button></div>';
+      '<button class="btn ghost" id="repTxt">⬇️ 导出报告（文本）</button>' +
+      '<button class="btn ghost" id="repJson">⬇️ 导出报告（JSON）</button>' +
+      '<button class="btn ghost" id="repArchive">🗂️ 存档本期（已有 ' + c.report.archivedCount(st) + ' 期）</button>' +
+      '<button class="btn" id="repClose">好的</button></div>' +
+      '<div class="muted small" style="margin-top:.35rem">存档后的报告会写进「设置 → 导出备份」，换设备导入时一起恢复；不含作文原文。</div>';
     mask.classList.add("show");
 
     box.querySelector("#repClose").onclick = function () { mask.classList.remove("show"); };
     box.querySelector("#repPrev").onclick = function () { showWeekly(el, off + 1); };
     var nx = box.querySelector("#repNext");
     if (nx) nx.onclick = function () { showWeekly(el, Math.max(0, off - 1)); };
-    box.querySelector("#repTxt").onclick = function () { downloadReport(cur, "txt"); };
-    box.querySelector("#repJson").onclick = function () { downloadReport(cur, "json"); };
+    box.querySelector("#repTxt").onclick = function () { downloadReport(cur, "txt", off); };
+    box.querySelector("#repJson").onclick = function () { downloadReport(cur, "json", off); };
+    box.querySelector("#repArchive").onclick = function () {
+      var r = c.report.archive(st, today, off);
+      c.app.toast(r.added ? "本期报告已存档 🗂️" : "本期报告存档已更新");
+      showWeekly(el, off);
+    };
     box.querySelectorAll("[data-act]").forEach(function (b) {
       b.onclick = function () {
         var hash = b.getAttribute("data-act");
@@ -1426,26 +1691,19 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       };
     });
 
+    /* R3 合并：state.reports（新）与 state.reportArchive（线上 B1 老字段）双写，
+       由上方 archive() 在渲染前完成，随导出备份一起走、换设备可恢复。 */
   }
 
-  /* 报告导出（文本 / JSON）：Blob 下载 */
-  function downloadReport(cur, kind) {
+  /* 报告导出（文本 / JSON）：统一走纯函数，Blob 本地下载，不联网。
+     R3 合并：文本与 JSON 与自动化用例、存档快照同源，不再是两套实现。 */
+  function downloadReport(cur, kind, off) {
     var c = core(), st = c.store.get();
     var today = c.u.todayKey();
-    var blob, name;
-    if (kind === "json") {
-      blob = new Blob([JSON.stringify({
-        period: [cur.dates[0], cur.dates[6]],
-        metrics: { days: cur.days, newWords: cur.newWords, reviewCount: cur.reviewCount, accuracy: cur.accuracy, sec: cur.sec, speakCount: cur.speakCount, essayCount: cur.essayCount },
-        subjects: c.report.subjects(st, cur.dates),
-        advice: cur.advice,
-        generatedBy: "local rules, not AI"
-      }, null, 2)], { type: "application/json" });
-      name = "learning-report-" + cur.dates[6] + ".json";
-    } else {
-      blob = new Blob([c.report.exportText(st, today, 0)], { type: "text/plain;charset=utf-8" });
-      name = "learning-report-" + cur.dates[6] + ".txt";
-    }
+    var isJson = kind === "json";
+    var text = isJson ? c.report.exportJson(st, today, off || 0) : c.report.exportText(st, today, off || 0);
+    var blob = new Blob([text], { type: isJson ? "application/json;charset=utf-8" : "text/plain;charset=utf-8" });
+    var name = "learning-report-" + cur.dates[0] + "_" + cur.dates[6] + (isJson ? ".json" : ".txt");
     var a = document.createElement("a");
     a.href = URL.createObjectURL(blob);
     a.download = name;
@@ -3240,7 +3498,8 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       (st.settings.lastBackupAt
         ? '<div class="muted small" style="margin-bottom:.5rem">📅 上次备份：' + core().u.esc(st.settings.lastBackupAt) + '</div>'
         : '') +
-      '<div class="muted small" style="margin:.3rem 0 .7rem">备份文件是一个 .json 文件，收好它，换设备时导入就能恢复。</div>' +
+      '<div class="muted small" style="margin:.3rem 0 .7rem">备份文件是一个 .json 文件，收好它，换设备时导入就能恢复。' +
+      '已存档 <b>' + core().report.archivedCount(st) + '</b> 期学习报告，会一起写进备份（不含作文原文）。</div>' +
       '<button class="btn block" id="btnExport" aria-label="导出备份文件">⬇️ 导出备份文件</button>' +
       '<div style="height:.5rem"></div>' +
       '<button class="btn ghost block" id="btnImport" aria-label="导入备份文件">⬆️ 导入备份文件（.json）</button>' +
@@ -3305,25 +3564,26 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       var dash = core().dash;
       if (dash && dash.showWeekly) dash.showWeekly(el, 0);
     };
-    $("#reportTxtBtn", el).onclick = function () {
+
+    /* R5 合并：报告卡片常驻导出入口（线上 R5 独有能力），不用先打开弹窗。
+       exportJson 在两条迭代线里分别返回「JSON 字符串」与「对象」，
+       这里做双兼容，避免把字符串二次序列化成带转义引号的坏文件。 */
+    function downloadCardReport(kind) {
       var c2 = core(), st2 = c2.store.get(), today2 = c2.u.todayKey();
-      var blob2 = new Blob([c2.report.exportText(st2, today2, 0)], { type: "text/plain;charset=utf-8" });
+      var isJson = kind === "json";
+      var raw = isJson ? c2.report.exportJson(st2, today2, 0) : c2.report.exportText(st2, today2, 0);
+      var payload = typeof raw === "string" ? raw : JSON.stringify(raw, null, 2);
+      var blob2 = new Blob([payload], {
+        type: isJson ? "application/json;charset=utf-8" : "text/plain;charset=utf-8"
+      });
       var a2 = document.createElement("a");
       a2.href = URL.createObjectURL(blob2);
-      a2.download = "learning-report-" + today2 + ".txt";
+      a2.download = "learning-report-" + today2 + (isJson ? ".json" : ".txt");
       document.body.appendChild(a2); a2.click();
       setTimeout(function () { URL.revokeObjectURL(a2.href); a2.remove(); }, 500);
-    };
-    $("#reportJsonBtn", el).onclick = function () {
-      var c3 = core(), st3 = c3.store.get(), today3 = c3.u.todayKey();
-      var js3 = c3.report.exportJson(st3, today3, 0);
-      var blob3 = new Blob([JSON.stringify(js3, null, 2)], { type: "application/json" });
-      var a3 = document.createElement("a");
-      a3.href = URL.createObjectURL(blob3);
-      a3.download = "learning-report-" + today3 + ".json";
-      document.body.appendChild(a3); a3.click();
-      setTimeout(function () { URL.revokeObjectURL(a3.href); a3.remove(); }, 500);
-    };
+    }
+    $("#reportTxtBtn", el).onclick = function () { downloadCardReport("txt"); };
+    $("#reportJsonBtn", el).onclick = function () { downloadCardReport("json"); };
 
     /* 备份：先触发下载并记录备份时间，立即重绘页面（提醒消失+显示上次备份日期），再弹文本兜底框 */
     $("#btnExport", el).onclick = function () {
@@ -3395,7 +3655,8 @@ body.dark .toast { background: rgba(230, 234, 241, .95); color: #161a22; }
       '<div class="stat"><div class="num">' + counts.speaking + '</div><div class="lbl">口语已练题</div></div>' +
       '<div class="stat ok"><div class="num">' + counts.essays + '</div><div class="lbl">历史作文</div></div>' +
       '</div>' +
-      '<div class="muted small" style="margin-top:.6rem">设置（深色模式、字号、每日新词）也一并恢复。</div>' +
+      '<div class="muted small" style="margin-top:.6rem">设置（深色模式、字号、每日新词）也一并恢复；' +
+      '同时恢复 <b>' + (counts.reports || 0) + '</b> 期学习报告存档（老备份没有存档时显示 0）。</div>' +
       '<div class="btns"><button class="btn block" id="repOk">好的</button></div>';
     mask.classList.add("show");
     box.querySelector("#repOk").onclick = function () { mask.classList.remove("show"); };
